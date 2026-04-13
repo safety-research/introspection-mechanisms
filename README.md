@@ -55,8 +55,9 @@ We investigate the mechanisms underlying introspective awareness in large langua
 │   ├── 11_head_ablation.py              # Attention head ablation
 │   ├── 12_head_investigation.py          # Attention head investigation
 │   ├── 13_steering_attribution.py        # Steering attribution framework (§5, Appendix)
-│   ├── 14_trained_steering_vector.py     # Trained steering vector (§6)
-│   └── 15_proxy_task_sweep.py            # Proxy task sweep
+│   ├── 14_trained_steering_vector.py     # Trained steering vector + bias training (§6)
+│   ├── 15_proxy_task_sweep.py            # Proxy task sweep
+│   └── 16_attribution_graph.py          # SAE attribution graph pipeline (§5.3-5.4, Fig 16)
 ├── plotting/                   # Figure generation scripts
 │   ├── plot_figures.py         # Standalone figure regeneration (metrics, attribution graphs)
 │   ├── plot_circuit_figures.py # Gate/evidence carrier figures
@@ -171,7 +172,33 @@ python experiments/13_steering_attribution.py \
 Train and evaluate the introspection steering vector:
 
 ```bash
+# Prefill detection (LoRA finetuning)
 python experiments/14_trained_steering_vector.py all
+
+# Bias vector training (Section 6: bias adapter on concept injection data)
+python experiments/14_trained_steering_vector.py generate-bias-data --model gemma3_27b
+python experiments/14_trained_steering_vector.py train-bias --model gemma3_27b
+python experiments/14_trained_steering_vector.py evaluate-bias --model gemma3_27b
+```
+
+### Step 8: SAE Attribution Graph (§5.3-5.4, Figure 16)
+
+Build attribution graphs tracing introspective detection through SAE/transcoder features:
+
+```bash
+# Auto-configure: detect pos/neg tokens and optimal strength
+python experiments/16_attribution_graph.py auto-config --concept Bread --layer 37
+
+# Full pipeline: extract SA, compute ISA, build graph (backward + forward)
+python experiments/16_attribution_graph.py all \
+    --concept Bread --layer 37 --strength 4.0 \
+    --direction both --trace-depth 2
+
+# Or run steps individually:
+python experiments/16_attribution_graph.py extract-sa --concept Bread --layer 37 --strength 4.0
+python experiments/16_attribution_graph.py compute-isa --concept Bread --layer 37
+python experiments/16_attribution_graph.py build-graph --concept Bread --layer 37 --direction both
+python experiments/16_attribution_graph.py visualize --concept Bread --layer 37
 ```
 
 ### Generating Figures

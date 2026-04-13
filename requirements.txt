@@ -16,3 +16,7 @@ optuna
 anthropic
 pyarrow
 plotly
+scipy
+safetensors
+huggingface_hub
+networkx
