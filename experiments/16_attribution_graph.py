@@ -867,281 +867,102 @@ def run_auto_config(args) -> None:
 
 # =============================================================================
 # Section A: SA Extraction
+# Matches working repo structure: separate functions for each pass.
+#   AdditiveLayerCut            — Steering cut strategy
+#   preload_saes()              — SAE loading
+#   compute_ga_pass()           — Pass 1: forward + backward → GA
+#   compute_sg_pass()           — Pass 2: JVP w.r.t. steering α → SG
+#   compute_forward_jvp_pass()  — Forward JVP from source decoder direction
+#   save_tangent_data() / load_tangent_data() — SG caching (safetensors)
+#   combine_ga_sg_to_sa()       — GA × SG per active feature + remainder
+#   make_logit_loss_fn()        — Loss for hop-0
+#   make_feature_target_loss_fn() — Loss for hop-1+
+#   extract_sa_for_strength()   — Backward orchestrator
+#   extract_forward_sa_for_strength() — Forward orchestrator
 # =============================================================================
 
-def _save_sg_cache(tangent_data: Dict[Tuple[int, str], torch.Tensor], cache_path: Path) -> None:
-    """Save SG tangent data to safetensors file."""
-    from safetensors.torch import save_file
-    flat = {}
-    for (li, suffix), tensor in tangent_data.items():
-        flat[f"{li}__{suffix.replace('.', '_')}"] = tensor.cpu().contiguous()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    save_file(flat, str(cache_path))
+
+class AdditiveLayerCut:
+    """Standard additive steering: z_l += α·v for all tokens after steering_start_pos."""
+
+    def make_steering_hook(self, steering_vec: torch.Tensor, steering_start_pos: int):
+        def hook_factory(steering_strength):
+            def hook(module, input, output):
+                is_tuple = isinstance(output, tuple)
+                h = output[0] if is_tuple else output
+                rest = output[1:] if is_tuple else ()
+                addition = torch.zeros_like(h)
+                addition[:, steering_start_pos:, :] = (steering_vec * steering_strength).unsqueeze(0)
+                return (h + addition,) + rest if is_tuple else h + addition
+            return hook
+        return hook_factory
+
+    def has_grad_path(self, layer_idx: int, sae_type: str, injection_layer: int) -> bool:
+        return (layer_idx > injection_layer) or (layer_idx == injection_layer and sae_type == "resid_post_all")
 
 
-def _load_sg_cache(cache_path: Path, device: str = "cpu") -> Dict[Tuple[int, str], torch.Tensor]:
-    """Load SG tangent data from safetensors file."""
-    from safetensors.torch import load_file
-    flat = load_file(str(cache_path), device=device)
-    tangent_data = {}
-    for key, tensor in flat.items():
-        parts = key.split("__", 1)
-        li = int(parts[0])
-        suffix = parts[1].replace("_", ".", 3)  # Restore dots in suffix
-        tangent_data[(li, suffix)] = tensor
-    return tangent_data
-
-
-@dataclass
-class _SAContext:
-    """Shared context for SA extraction functions."""
-    inner: Any  # model.model
-    tokenizer: Any
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    seq_len: int
-    steering_start: int
-    steering_vec: torch.Tensor
-    n_layers: int
-    model_size: str
-    layers_module: Any  # nn.ModuleList
-    device: str
-
-
-def _prepare_sa_context(
-    model_wrapper: ModelWrapper,
-    concept_vector: torch.Tensor,
-    trial_num: int,
-    device: str,
-) -> _SAContext:
-    """Prepare shared context for SA extraction (prompt, tokenization, steering)."""
-    tokenizer = model_wrapper.tokenizer
-    inner = model_wrapper.model
-    messages = build_messages(trial_num)
-    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
-    input_ids = input_ids.to(device)
-    attention_mask = torch.ones_like(input_ids).to(device)
-    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
-    return _SAContext(
-        inner=inner, tokenizer=tokenizer,
-        input_ids=input_ids, attention_mask=attention_mask,
-        seq_len=seq_len, steering_start=steering_start,
-        steering_vec=concept_vector.to(device).float(),
-        n_layers=model_wrapper.n_layers,
-        model_size=_model_name_to_sae_size(model_wrapper.model_name),
-        layers_module=get_layers(inner),
-        device=device,
-    )
-
-
-def _make_steering_hook(ctx: _SAContext, s):
-    """Create a steering hook that adds steering_vec * s at steering_start."""
-    def hook(module, input, output):
-        h = output[0] if isinstance(output, tuple) else output
-        rest = output[1:] if isinstance(output, tuple) else ()
-        addition = torch.zeros_like(h)
-        addition[:, ctx.steering_start:, :] = (ctx.steering_vec * s).unsqueeze(0)
-        modified = h + addition
-        return (modified,) + rest if isinstance(output, tuple) else modified
-    return hook
-
-
-def _preload_saes(
-    layer_lo: int, layer_hi: int,
-    sae_width: str, sae_l0: str, model_size: str,
+def preload_saes(
+    n_layers: int, model_name: str, sae_width: str, sae_l0: str,
+    device: str = "cpu", layer_indices: Optional[set] = None,
 ) -> Dict[Tuple[int, str], JumpReLUSAE]:
-    """Preload SAEs to CPU for a layer range."""
+    """Preload SAEs to the given device. Returns dict of (layer_idx, sae_type) -> sae."""
+    model_size = _model_name_to_sae_size(model_name)
     unique_types = set(SAE_TYPE_LOAD_MAP.get(st, st) for st in SAE_TYPES)
-    cache: Dict[Tuple[int, str], JumpReLUSAE] = {}
-    for li in tqdm(range(layer_lo, layer_hi), desc="Preloading SAEs", leave=False):
+    sae_cache: Dict[Tuple[int, str], JumpReLUSAE] = {}
+    layers_to_load = sorted(layer_indices) if layer_indices is not None else range(n_layers)
+    for li in tqdm(layers_to_load, desc="Preloading SAEs", leave=False):
         for st in unique_types:
             try:
-                sae = load_sae(li, sae_width, sae_l0, st, model_size, True, "cpu")
-                cache[(li, st)] = sae.eval()
+                sae = load_sae(li, sae_width, sae_l0, st, model_size, True, device)
+                sae_cache[(li, st)] = sae.eval()
             except Exception:
                 pass
-    return cache
+    return sae_cache
 
 
-def _run_jvp_and_collect_tangents(
-    ctx: _SAContext,
-    jvp_primal: torch.Tensor,
-    jvp_tangent: torch.Tensor,
-    jvp_fn,
-    layer_lo: int,
-    layer_hi: int,
-) -> Dict[Tuple[int, str], torch.Tensor]:
-    """Run JVP and collect tangent data indexed by (layer, suffix)."""
-    _, site_tangents = torch.func.jvp(jvp_fn, (jvp_primal,), (jvp_tangent,))
-    tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
-    for li_offset, li in enumerate(range(layer_lo, layer_hi)):
-        for j, suffix in enumerate(JVP_SITE_SUFFIXES):
-            idx = li_offset * len(JVP_SITE_SUFFIXES) + j
-            tangent_data[(li, suffix)] = site_tangents[idx].detach()
-    del site_tangents
-    torch.cuda.empty_cache()
-    return tangent_data
+# ── GA computation (Pass 1: forward + backward) ─────────────────────────────
 
-
-def _project_tangents_to_features(
-    tangent_data: Dict[Tuple[int, str], torch.Tensor],
-    sae_cache: Dict[Tuple[int, str], JumpReLUSAE],
-    layer_lo: int,
-    layer_hi: int,
-    device: str,
-    base_meta: Dict[str, Any],
-    threshold: float = 1e-8,
-) -> List[Dict[str, Any]]:
-    """Project tangent data onto SAE encoder directions, return feature rows.
-
-    Used by forward SA to convert JVP tangents into per-feature attributions.
-    """
-    rows: List[Dict[str, Any]] = []
-    with torch.no_grad():
-        for li in range(layer_lo, layer_hi):
-            for st in SAE_TYPES:
-                in_sfx = SAE_TYPE_KEYS[st][0]
-                lt = SAE_TYPE_LOAD_MAP.get(st, st)
-                if (li, lt) not in sae_cache:
-                    continue
-                tkey = (li, in_sfx)
-                if tkey not in tangent_data:
-                    continue
-                dx = tangent_data[tkey].to(device).float()
-                if dx.dim() == 3:
-                    dx = dx[0]
-
-                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
-                fwd_jvp = dx @ sae.w_enc  # [seq_len, d_sae]
-                nonzero = (fwd_jvp.abs() > threshold)
-                tok_idx, feat_idx = nonzero.nonzero(as_tuple=True)
-
-                if len(tok_idx) > 0:
-                    vals = fwd_jvp[tok_idx, feat_idx]
-                    for i in range(len(tok_idx)):
-                        rows.append({
-                            **base_meta, "layer": li, "token_pos": tok_idx[i].item(),
-                            "sae_type": st, "feature_id": feat_idx[i].item(),
-                            "steering_attribution": vals[i].item(),
-                        })
-                sae.to("cpu")
-                torch.cuda.empty_cache()
-    return rows
-
-
-def _extract_sa_core(
-    model_wrapper: ModelWrapper,
-    concept: str,
-    concept_vector: torch.Tensor,
-    injection_layer: int,
-    strength: float,
-    trial_num: int = 1,
-    sae_width: str = DEFAULT_SAE_WIDTH,
-    sae_l0: str = DEFAULT_SAE_L0,
-    device: str = "cuda",
-    # ── What differs between root-loss and feature-targeted modes ──
-    target: Optional[Dict] = None,
-    pos_token_id: int = 12932,
-    neg_token_id: int = 3771,
-    compute_remainder: bool = True,
-    # ── SG caching ──
-    sg_cache_dir: Optional[Path] = None,
-) -> List[Dict[str, Any]]:
-    """Core two-pass SA extraction shared by both loss modes.
-
-    Two-pass approach:
-      Pass 1 (forward + backward): Compute GA = dL/dx at each site
-      Pass 2 (JVP forward): Compute SG = dx/dalpha via forward-mode AD
-      Combine: SA = GA * SG per active feature
-
-    SG caching: Pass 2 (JVP) depends only on steering, not on the loss function.
-    In root mode, SG is saved to sg_cache_dir. In feature-targeted mode, SG is
-    loaded from cache (skipping the expensive JVP pass entirely). This halves
-    GPU cost for hop-1+ targets.
+def compute_ga_pass(
+    model_inner, input_ids, attention_mask, injection_layer, strength,
+    steering_hook_factory, n_layers, loss_fn, device="cuda", layer_indices=None,
+):
+    """Pass 1: Forward + backward to compute Gradient Attribution (GA).
 
     Args:
-        target: If None, uses logit-gap loss (root mode, all layers).
-                If dict with {layer, sae_type, feature_id, token_pos},
-                uses target-feature-activation loss (upstream layers only).
-        pos_token_id / neg_token_id: Token IDs for logit-gap loss (root mode only).
-        compute_remainder: Whether to compute per-token remainder SA diagnostics.
-                          True for root mode, False for feature-targeted mode.
-        sg_cache_dir: Directory for SG cache files. If set:
-                      - root mode: saves tangent_data.safetensors after JVP
-                      - feature-targeted mode: loads from cache, skips JVP
-
-    Returns:
-        List of row dicts ready for pd.DataFrame / parquet.
+        loss_fn: Callable(outputs, raw_activations) -> loss tensor.
+        layer_indices: If set, only register hooks at these layers.
+    Returns (grad_data, act_data) dicts keyed by (layer_idx, sae_type).
     """
-    is_root = target is None
-    ctx = _prepare_sa_context(model_wrapper, concept_vector, trial_num, device)
-    inner = ctx.inner
-    n_layers = ctx.n_layers
-    seq_len = ctx.seq_len
+    layers_module = get_layers(model_inner)
+    hook_layers = sorted(layer_indices) if layer_indices is not None else list(range(n_layers))
 
-    # Layer range: all layers for root, injection..target for feature-targeted
-    if is_root:
-        layer_lo, layer_hi = 0, n_layers
-    else:
-        layer_lo = injection_layer
-        layer_hi = target["layer"]
+    steer_handle = layers_module[injection_layer].register_forward_hook(steering_hook_factory(strength))
+    act_hooks = ActivationHooks(model_inner, retain_grad=True)
+    act_hooks.register_hooks(layer_indices=hook_layers, capture_types=list(CAPTURE_TYPES_SAE))
 
-    hook_hi = n_layers if is_root else target["layer"] + 1
+    try:
+        with act_hooks:
+            model_inner.eval()
+            outputs = model_inner(input_ids=input_ids, attention_mask=attention_mask,
+                                  output_hidden_states=False, return_dict=True)
+    finally:
+        steer_handle.remove()
+        act_hooks.remove_hooks()
 
-    sae_cache = _preload_saes(layer_lo, layer_hi, sae_width, sae_l0, ctx.model_size)
-
-    target_sae = None
-    if not is_root:
-        tgt_load = SAE_TYPE_LOAD_MAP.get(target["sae_type"], target["sae_type"])
-        target_sae = load_sae(target["layer"], sae_width, sae_l0, tgt_load, ctx.model_size, True, device)
-
-    def run_forward(s, retain_grad=False):
-        handle = ctx.layers_module[injection_layer].register_forward_hook(_make_steering_hook(ctx, s))
-        hooks = ActivationHooks(inner, retain_grad=retain_grad)
-        hooks.register_hooks(list(range(layer_lo, hook_hi)), CAPTURE_TYPES_SAE)
-        try:
-            with hooks:
-                inner.eval()
-                out = inner(input_ids=ctx.input_ids, attention_mask=ctx.attention_mask,
-                            output_hidden_states=False, return_dict=True)
-        finally:
-            handle.remove()
-            hooks.remove_hooks()
-        return out, hooks.get_activations()
-
-    # ── Pass 1: Forward + backward for GA ──
-    outputs, raw_acts = run_forward(strength, retain_grad=True)
-
-    if is_root:
-        logits = outputs.logits[:, -1, :]
-        loss = logits[:, pos_token_id] - logits[:, neg_token_id]
-    else:
-        # Loss = target feature activation
-        tgt_suffix = SAE_TYPE_KEYS[target["sae_type"]][0]
-        tgt_act_key = _act_key(target["layer"], tgt_suffix)
-        if tgt_act_key not in raw_acts or not raw_acts[tgt_act_key]:
-            return []
-        tgt_act = raw_acts[tgt_act_key][0]
-        if isinstance(tgt_act, (list, tuple)):
-            tgt_act = tgt_act[0]
-        tgt_act_2d = tgt_act[0] if tgt_act.dim() == 3 else tgt_act
-        tgt_encoded = target_sae.encode(tgt_act_2d.float().to(device))
-        tp = target["token_pos"] if target["token_pos"] >= 0 else seq_len + target["token_pos"]
-        loss = tgt_encoded[tp, target["feature_id"]]
-
+    raw_activations = act_hooks.get_activations()
+    loss = loss_fn(outputs, raw_activations)
     loss.sum().backward()
 
-    # Collect gradients and activations
     grad_data: Dict[Tuple[int, str], torch.Tensor] = {}
     act_data: Dict[Tuple[int, str], torch.Tensor] = {}
-    for li in range(layer_lo, layer_hi):
+    for li in hook_layers:
         for st in SAE_TYPES:
             in_suffix, tgt_suffix = SAE_TYPE_KEYS[st]
-            key_suffix = tgt_suffix if (st == "transcoder_all" and tgt_suffix) else in_suffix
-            akey = _act_key(li, key_suffix)
-            if akey not in raw_acts or not raw_acts[akey]:
+            grad_suffix = tgt_suffix if (st == "transcoder_all" and tgt_suffix) else in_suffix
+            grad_key = _act_key(li, grad_suffix)
+            if grad_key not in raw_activations or not raw_activations[grad_key]:
                 continue
-            t = raw_acts[akey][0]
+            t = raw_activations[grad_key][0]
             if isinstance(t, (list, tuple)):
                 t = t[0]
             if t.grad is None:
@@ -1149,78 +970,187 @@ def _extract_sa_core(
             grad_data[(li, st)] = t.grad.detach().float()[0].cpu()
 
             enc_key = _act_key(li, in_suffix)
-            if enc_key not in raw_acts or not raw_acts[enc_key]:
+            if enc_key not in raw_activations or not raw_activations[enc_key]:
                 continue
-            enc_t = raw_acts[enc_key][0]
+            enc_t = raw_activations[enc_key][0]
             if isinstance(enc_t, (list, tuple)):
                 enc_t = enc_t[0]
             act_data[(li, st)] = enc_t[0].detach().float().cpu()
 
-    del raw_acts, outputs
+    del raw_activations, outputs
     torch.cuda.empty_cache()
+    return grad_data, act_data
 
-    # ── Pass 2: JVP for SG (with caching) ──
-    # SG depends only on steering, not loss. Cache from root mode, reuse in feature-targeted.
-    strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
-    sg_cache_file = sg_cache_dir / strength_str / "tangent_data.safetensors" if sg_cache_dir else None
 
-    if not is_root and sg_cache_file and sg_cache_file.exists():
-        # Feature-targeted mode with cached SG: skip JVP entirely
-        tangent_data = _load_sg_cache(sg_cache_file, device=device)
-        print(f"  SG loaded from cache: {sg_cache_file}")
+# ── SG computation (Pass 2: JVP forward) ────────────────────────────────────
+
+def compute_sg_pass(
+    model_inner, input_ids, attention_mask, injection_layer, strength,
+    steering_hook_factory, n_layers, device="cuda",
+):
+    """Pass 2: JVP forward to compute Steering Gradient (SG = dx/dalpha).
+
+    Always captures all layers since SG is cached and reused across hops.
+    Returns tangent_data dict keyed by (layer_idx, suffix).
+    """
+    layers_module = get_layers(model_inner)
+    alpha_primal = torch.tensor(strength, dtype=torch.float32, device=device)
+    alpha_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    def jvp_forward(alpha_val):
+        handle = layers_module[injection_layer].register_forward_hook(steering_hook_factory(alpha_val))
+        act_hooks = ActivationHooks(model_inner, retain_grad=False)
+        act_hooks.register_hooks(list(range(n_layers)), list(CAPTURE_TYPES_SAE))
+        try:
+            with act_hooks:
+                model_inner.eval()
+                _ = model_inner(input_ids=input_ids, attention_mask=attention_mask,
+                                output_hidden_states=False, return_dict=True)
+        finally:
+            handle.remove()
+            act_hooks.remove_hooks()
+        raw = act_hooks.get_activations()
+        result = []
+        for li in range(n_layers):
+            for suffix in JVP_SITE_SUFFIXES:
+                t = raw.get(_act_key(li, suffix), [None])[0]
+                if t is None:
+                    t = torch.zeros(1)
+                if isinstance(t, (list, tuple)):
+                    t = t[0]
+                result.append(t[0] if t.dim() == 3 else t)
+        return result
+
+    _, site_tangents = torch.func.jvp(jvp_forward, (alpha_primal,), (alpha_tangent,))
+
+    tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
+    for li in range(n_layers):
+        for j, suffix in enumerate(JVP_SITE_SUFFIXES):
+            tangent_data[(li, suffix)] = site_tangents[li * len(JVP_SITE_SUFFIXES) + j].detach()
+    del site_tangents
+    torch.cuda.empty_cache()
+    return tangent_data
+
+
+# ── Forward JVP pass (for forward tracing) ──────────────────────────────────
+
+def compute_forward_jvp_pass(
+    model_inner, input_ids, attention_mask, injection_layer, strength,
+    steering_hook_factory, source_layer, source_decoder_vec, source_sae_type,
+    n_layers, device="cuda",
+):
+    """Forward JVP: propagate tangent from source feature's decoder direction.
+
+    Symmetric to compute_sg_pass. Steering is applied at fixed strength (not differentiated).
+    Returns tangent_data for layers >= source_layer.
+    """
+    layers_module = get_layers(model_inner)
+    t_primal = torch.tensor(0.0, dtype=torch.float32, device=device)
+    t_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
+    source_vec = source_decoder_vec.to(device).float()
+
+    # Fixed steering hook (not part of JVP)
+    steer_handle = layers_module[injection_layer].register_forward_hook(
+        steering_hook_factory(torch.tensor(strength, dtype=torch.float32, device=device)))
+
+    # Determine perturbation hook site
+    use_pre_hook = False
+    if source_sae_type == "attn_out_all":
+        src_module = layers_module[source_layer].self_attn.o_proj
+        use_pre_hook = True
+    elif source_sae_type in ("transcoder_all", "mlp_out_all"):
+        src_module = getattr(layers_module[source_layer], "post_feedforward_layernorm",
+                             layers_module[source_layer])
     else:
-        # Compute SG via JVP
-        alpha_primal = torch.tensor(strength, dtype=torch.float32, device=device)
-        alpha_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
+        src_module = layers_module[source_layer]
 
-        def jvp_forward_sg(alpha_val):
-            handle = ctx.layers_module[injection_layer].register_forward_hook(_make_steering_hook(ctx, alpha_val))
-            hooks = ActivationHooks(inner, retain_grad=False)
-            hooks.register_hooks(list(range(layer_lo, layer_hi)), CAPTURE_TYPES_SAE)
-            try:
-                with hooks:
-                    inner.eval()
-                    _ = inner(input_ids=ctx.input_ids, attention_mask=ctx.attention_mask,
-                              output_hidden_states=False, return_dict=True)
-            finally:
-                handle.remove()
-                hooks.remove_hooks()
-            raw = hooks.get_activations()
-            result = []
-            for li in range(layer_lo, layer_hi):
-                for suffix in JVP_SITE_SUFFIXES:
-                    akey = _act_key(li, suffix)
-                    t = raw[akey][0] if akey in raw and raw[akey] else torch.zeros(1)
-                    if isinstance(t, (list, tuple)):
-                        t = t[0]
-                    result.append(t[0] if t.dim() == 3 else t)
-            return result
+    def jvp_forward(t_val):
+        perturbation = source_vec * t_val
+        if use_pre_hook:
+            def src_hook(module, args):
+                x = args[0]
+                p = perturbation.unsqueeze(0).unsqueeze(0).expand_as(x)
+                return (x + p,) + args[1:]
+            src_h = src_module.register_forward_pre_hook(src_hook)
+        else:
+            def src_hook(module, input, output):
+                h = output[0] if isinstance(output, tuple) else output
+                rest = output[1:] if isinstance(output, tuple) else ()
+                p = perturbation.unsqueeze(0).unsqueeze(0).expand_as(h)
+                return (h + p,) + rest if isinstance(output, tuple) else h + p
+            src_h = src_module.register_forward_hook(src_hook)
 
-        tangent_data = _run_jvp_and_collect_tangents(
-            ctx, alpha_primal, alpha_tangent, jvp_forward_sg, layer_lo, layer_hi)
+        act_hooks = ActivationHooks(model_inner, retain_grad=False)
+        act_hooks.register_hooks(list(range(n_layers)), list(CAPTURE_TYPES_SAE))
+        try:
+            with act_hooks:
+                model_inner.eval()
+                _ = model_inner(input_ids=input_ids, attention_mask=attention_mask,
+                                output_hidden_states=False, return_dict=True)
+        finally:
+            src_h.remove()
+            act_hooks.remove_hooks()
 
-        # Root mode: save SG to cache for reuse by hop-1+ targets
-        if is_root and sg_cache_file:
-            _save_sg_cache(tangent_data, sg_cache_file)
-            print(f"  SG cached: {sg_cache_file}")
+        raw = act_hooks.get_activations()
+        result = []
+        for li in range(n_layers):
+            for suffix in JVP_SITE_SUFFIXES:
+                t = raw.get(_act_key(li, suffix), [None])[0]
+                if t is None:
+                    t = torch.zeros(1, device=device)
+                if isinstance(t, (list, tuple)):
+                    t = t[0]
+                result.append(t[0] if t.dim() == 3 else t)
+        return result
 
-    # ── Combine: compute SA per active feature ──
-    base_meta: Dict[str, Any] = {
-        "concept": concept,
-        "injection_layer": injection_layer,
-        "injection_strength": strength,
-        "trial_num": trial_num,
-    }
-    if not is_root:
-        base_meta.update({
-            "target_layer": target["layer"], "target_sae_type": target["sae_type"],
-            "target_feature_id": target["feature_id"], "target_token_pos": target["token_pos"],
-        })
+    try:
+        _, site_tangents = torch.func.jvp(jvp_forward, (t_primal,), (t_tangent,))
+    finally:
+        steer_handle.remove()
 
+    tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
+    for li in range(source_layer, n_layers):
+        for j, suffix in enumerate(JVP_SITE_SUFFIXES):
+            tangent_data[(li, suffix)] = site_tangents[li * len(JVP_SITE_SUFFIXES) + j].detach()
+    del site_tangents
+    torch.cuda.empty_cache()
+    return tangent_data
+
+
+# ── SG caching ──────────────────────────────────────────────────────────────
+
+def save_tangent_data(tangent_data: Dict[Tuple[int, str], torch.Tensor], path: Path) -> None:
+    """Save SG tangent data to disk as safetensors."""
+    from safetensors.torch import save_file
+    flat = {f"{li}|{suffix}": t.cpu().contiguous() for (li, suffix), t in tangent_data.items()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file(flat, str(path))
+
+
+def load_tangent_data(path: Path) -> Dict[Tuple[int, str], torch.Tensor]:
+    """Load SG tangent data from disk."""
+    from safetensors.torch import load_file
+    flat = load_file(str(path))
+    return {(int(k.split("|")[0]), k.split("|")[1]): t for k, t in flat.items()}
+
+
+# ── SA combine: GA × SG per SAE feature ─────────────────────────────────────
+
+def combine_ga_sg_to_sa(
+    grad_data, act_data, tangent_data, sae_cache, cut_strategy,
+    injection_layer, n_layers, seq_len, base_meta, device="cuda",
+    compute_remainder=True,
+):
+    """Combine GA and SG to compute SA = GA × SG for all active SAE features.
+
+    Also computes per-token remainder SA when compute_remainder=True.
+    Returns list of row dicts.
+    """
     feature_rows: List[Dict[str, Any]] = []
+    loaded_layers = sorted(set(li for li, _ in sae_cache))
 
     with torch.no_grad():
-        for li in tqdm(range(layer_lo, layer_hi), desc="SA combine", leave=False):
+        for li in tqdm(loaded_layers, desc="SA combine", leave=False):
             for st in SAE_TYPES:
                 in_suffix, tgt_suffix = SAE_TYPE_KEYS[st]
                 load_type = SAE_TYPE_LOAD_MAP.get(st, st)
@@ -1230,37 +1160,33 @@ def _extract_sa_core(
                 grad_tensor = grad_data[(li, st)].to(device)
                 x_all = act_data[(li, st)].to(device)
                 sae = sae_cache[(li, load_type)].to(device=device, dtype=torch.float32).eval()
+                w_enc, w_dec = sae.w_enc, sae.w_dec
 
                 sae_acts = sae.encode(x_all)
-                active_mask = sae_acts > 0
-                tok_idx, feat_idx = active_mask.nonzero(as_tuple=True)
+                tok_idx, feat_idx = (sae_acts > 0).nonzero(as_tuple=True)
                 n_active = len(tok_idx)
+                active_acts = sae_acts[tok_idx, feat_idx] if n_active > 0 else torch.tensor([])
 
                 ga_vals = torch.zeros(n_active, device=device)
                 sg_vals = torch.zeros(n_active, device=device)
-                active_acts = sae_acts[tok_idx, feat_idx] if n_active > 0 else torch.tensor([])
-
                 if n_active > 0:
-                    ga_vals = (grad_tensor[tok_idx] * sae.w_dec[feat_idx]).sum(dim=-1)
+                    ga_vals = (grad_tensor[tok_idx] * w_dec[feat_idx]).sum(dim=-1)
 
-                has_grad_path = (li > injection_layer) or (li == injection_layer and st == "resid_post_all")
-                if has_grad_path and n_active > 0:
+                has_gp = cut_strategy.has_grad_path(li, st, injection_layer)
+                if has_gp and n_active > 0:
                     tkey = (li, in_suffix)
                     if tkey in tangent_data:
                         dx = tangent_data[tkey].to(device).float()
                         if dx.dim() == 3:
                             dx = dx[0]
-                        sg_vals = (dx[tok_idx] * sae.w_enc[:, feat_idx].T).sum(dim=-1)
+                        sg_vals = (dx[tok_idx] * w_enc[:, feat_idx].T).sum(dim=-1)
 
                 sa_vals = ga_vals * sg_vals
 
                 if n_active > 0:
-                    tl = tok_idx.cpu().tolist()
-                    fl = feat_idx.cpu().tolist()
-                    al = active_acts.cpu().tolist()
-                    gl = ga_vals.cpu().tolist()
-                    sl = sg_vals.cpu().tolist()
-                    sal = sa_vals.cpu().tolist()
+                    tl, fl = tok_idx.cpu().tolist(), feat_idx.cpu().tolist()
+                    al, gl = active_acts.cpu().tolist(), ga_vals.cpu().tolist()
+                    sl, sal = sg_vals.cpu().tolist(), sa_vals.cpu().tolist()
                     for i in range(n_active):
                         feature_rows.append({
                             **base_meta, "layer": li, "token_pos": tl[i],
@@ -1269,30 +1195,27 @@ def _extract_sa_core(
                             "steering_grad": sl[i], "steering_attribution": sal[i],
                         })
 
-                # Per-token remainder SA (only for root mode)
                 if compute_remainder:
-                    # remainder_SA[t] = (grad[t] . dx/dalpha[t]) - sum_f SA_f(t)
-                    tkey = (li, in_suffix)
-                    total = torch.zeros(seq_len, device=device)
-                    if has_grad_path and tkey in tangent_data:
-                        dx = tangent_data[tkey].to(device).float()
+                    total_sfx = tgt_suffix if tgt_suffix else in_suffix
+                    total_key = (li, total_sfx)
+                    per_token_total = torch.zeros(seq_len, device=device)
+                    if has_gp and total_key in tangent_data:
+                        dx = tangent_data[total_key].to(device).float()
                         if dx.dim() == 3:
                             dx = dx[0]
-                        total = (grad_tensor * dx).sum(dim=-1)
+                        per_token_total = (grad_tensor * dx).sum(dim=-1)
 
                     feat_sa_sum = torch.zeros(seq_len, device=device)
                     if n_active > 0:
                         feat_sa_sum.scatter_add_(0, tok_idx, sa_vals)
-                    rem_sa = total - feat_sa_sum
+                    rem_sa = per_token_total - feat_sa_sum
 
-                    # Remainder diagnostics: norm, GA, SG
                     if tgt_suffix is not None:
-                        recon_all = sae(x_all)
-                        if (li, "mlp_out_all") in act_data:
-                            target_all = act_data[(li, "mlp_out_all")].to(device)
-                        else:
-                            target_all = x_all
-                        remainder = target_all - recon_all
+                        recon = sae(x_all)
+                        tgt = act_data.get((li, "mlp_out_all"), x_all)
+                        if isinstance(tgt, torch.Tensor) and tgt.device.type == "cpu":
+                            tgt = tgt.to(device)
+                        remainder = tgt - recon
                     else:
                         remainder = x_all - sae.decode(sae_acts)
 
@@ -1301,117 +1224,293 @@ def _extract_sa_core(
                     rem_ga = (grad_tensor * (remainder / safe_norm)).sum(dim=-1)
 
                     rem_sg = torch.zeros(seq_len, device=device)
-                    if has_grad_path and tkey in tangent_data:
-                        dx_rem = tangent_data[tkey].to(device).float()
-                        if dx_rem.dim() == 3:
-                            dx_rem = dx_rem[0]
-                        drecon_dalpha = torch.zeros_like(dx_rem)
+                    if has_gp and total_key in tangent_data:
+                        dx_r = tangent_data[total_key].to(device).float()
+                        if dx_r.dim() == 3:
+                            dx_r = dx_r[0]
+                        drecon = torch.zeros_like(dx_r)
                         if n_active > 0:
-                            contrib = sg_vals.unsqueeze(-1) * sae.w_dec[feat_idx]
-                            drecon_dalpha.index_add_(0, tok_idx, contrib)
-                        rem_sg = (dx_rem - drecon_dalpha).norm(dim=-1)
+                            drecon.index_add_(0, tok_idx, sg_vals.unsqueeze(-1) * w_dec[feat_idx])
+                        rem_sg = (dx_r - drecon).norm(dim=-1)
 
-                    rem_sa_l = rem_sa.cpu().tolist()
-                    rem_norm_l = rem_norm.cpu().tolist()
-                    rem_ga_l = rem_ga.cpu().tolist()
-                    rem_sg_l = rem_sg.cpu().tolist()
+                    rsa, rn = rem_sa.cpu().tolist(), rem_norm.cpu().tolist()
+                    rga, rsg = rem_ga.cpu().tolist(), rem_sg.cpu().tolist()
                     for t in range(seq_len):
                         feature_rows.append({
                             **base_meta, "layer": li, "token_pos": t,
                             "sae_type": st, "feature_id": -1,
-                            "activation": rem_norm_l[t],
-                            "gradient_attribution": rem_ga_l[t],
-                            "steering_grad": rem_sg_l[t],
-                            "steering_attribution": rem_sa_l[t],
+                            "activation": rn[t], "gradient_attribution": rga[t],
+                            "steering_grad": rsg[t], "steering_attribution": rsa[t],
                         })
 
                 sae.to("cpu")
                 torch.cuda.empty_cache()
 
-    torch.cuda.empty_cache()
     return feature_rows
 
 
-def extract_steering_attribution(
-    model_wrapper: ModelWrapper,
-    concept: str,
-    concept_vector: torch.Tensor,
-    injection_layer: int,
-    strength: float,
-    output_dir: Path,
-    trial_num: int = 1,
-    pos_token_id: int = 12932,
-    neg_token_id: int = 3771,
-    sae_width: str = DEFAULT_SAE_WIDTH,
-    sae_l0: str = DEFAULT_SAE_L0,
-    device: str = "cuda",
-    sg_cache_dir: Optional[Path] = None,
-) -> Optional[Path]:
-    """Extract SA for all SAE features at one injection strength (root logit-gap loss).
+# ── Loss functions ───────────────────────────────────────────────────────────
 
-    If sg_cache_dir is set, saves SG tangent data for reuse by hop-1+ targets.
-    Returns path to output parquet, or None on failure.
+def make_logit_loss_fn(pos_token_id: int, neg_token_id: int):
+    """Standard SA loss: logit(pos) - logit(neg) at the last token."""
+    def loss_fn(outputs, raw_activations):
+        return outputs.logits[:, -1, pos_token_id] - outputs.logits[:, -1, neg_token_id]
+    return loss_fn
+
+
+def make_feature_target_loss_fn(target_layer, target_sae_type, target_feature_id, target_token_pos,
+                                 sae_width, sae_l0, model_name, device, seq_len):
+    """Feature-targeted loss: activation of a specific SAE feature."""
+    tgt_load = SAE_TYPE_LOAD_MAP.get(target_sae_type, target_sae_type)
+    model_size = _model_name_to_sae_size(model_name)
+    target_sae = load_sae(target_layer, sae_width, sae_l0, tgt_load, model_size, True, device)
+    tgt_in_suffix = SAE_TYPE_KEYS[target_sae_type][0]
+
+    def loss_fn(outputs, raw_activations):
+        tgt_key = _act_key(target_layer, tgt_in_suffix)
+        if tgt_key not in raw_activations or not raw_activations[tgt_key]:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        tgt_act = raw_activations[tgt_key][0]
+        if isinstance(tgt_act, (list, tuple)):
+            tgt_act = tgt_act[0]
+        tgt_2d = tgt_act[0] if tgt_act.dim() == 3 else tgt_act
+        encoded = target_sae.encode(tgt_2d.float().to(device))
+        tp = target_token_pos if target_token_pos >= 0 else seq_len + target_token_pos
+        return encoded[tp, target_feature_id]
+    return loss_fn
+
+
+# ── Backward SA orchestrator ────────────────────────────────────────────────
+
+def extract_sa_for_strength(
+    model_wrapper: ModelWrapper, concept: str, concept_vector: torch.Tensor,
+    injection_layer: int, strength: float, output_dir: Path,
+    trial_num: int = 1, pos_token_id: int = 12932, neg_token_id: int = 3771,
+    sae_width: str = DEFAULT_SAE_WIDTH, sae_l0: str = DEFAULT_SAE_L0, device: str = "cuda",
+    loss_fn_maker=None, extra_meta: Optional[Dict] = None,
+    output_filename: str = "sa_trial{trial_num}.parquet",
+    sg_cache_dir: Optional[Path] = None, save_sg_cache: bool = False,
+    layer_indices: Optional[set] = None, compute_remainder: bool = True,
+) -> Optional[Path]:
+    """Unified backward SA extraction: GA (Pass 1) + SG (Pass 2) + combine.
+
+    Args:
+        loss_fn_maker: Callable(outputs, raw_activations) -> loss.
+            If None, uses make_logit_loss_fn(pos_token_id, neg_token_id).
+        sg_cache_dir: If set, look for / save SG tangent data here.
+        save_sg_cache: If True and sg_cache_dir is set, save SG after computing.
     """
     import pandas as pd
 
-    rows = _extract_sa_core(
-        model_wrapper, concept, concept_vector, injection_layer, strength,
-        trial_num, sae_width, sae_l0, device,
-        target=None, pos_token_id=pos_token_id, neg_token_id=neg_token_id,
-        compute_remainder=True, sg_cache_dir=sg_cache_dir,
-    )
+    tokenizer = model_wrapper.tokenizer
+    inner = model_wrapper.model
+    messages = build_messages(trial_num)
+    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
+    input_ids = input_ids.to(device)
+    attention_mask = torch.ones_like(input_ids).to(device)
+    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
+    n_layers = model_wrapper.n_layers
 
+    cut = AdditiveLayerCut()
+    steering_vec = concept_vector.to(device).float()
+    hook_factory = cut.make_steering_hook(steering_vec, steering_start)
+
+    sae_cache = preload_saes(n_layers, model_wrapper.model_name, sae_width, sae_l0, "cpu", layer_indices)
+
+    if loss_fn_maker is None:
+        loss_fn_maker = make_logit_loss_fn(pos_token_id, neg_token_id)
+
+    base_meta = {"concept": concept, "injection_layer": injection_layer,
+                 "injection_strength": strength, "trial_num": trial_num}
+    if extra_meta:
+        base_meta.update(extra_meta)
+
+    hook_layers = sorted(layer_indices) if layer_indices else None
+
+    # Pass 1: GA
+    grad_data, act_data = compute_ga_pass(
+        inner, input_ids, attention_mask, injection_layer, strength,
+        hook_factory, n_layers, loss_fn_maker, device, hook_layers)
+
+    # Pass 2: SG (with caching)
     strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
-    out_path = output_dir / strength_str / f"sa_trial{trial_num}.parquet"
+    sg_file = sg_cache_dir / strength_str / "tangent_data.safetensors" if sg_cache_dir else None
+
+    if sg_file and sg_file.exists():
+        tangent_data = load_tangent_data(sg_file)
+        print(f"  SG loaded from cache")
+    else:
+        tangent_data = compute_sg_pass(
+            inner, input_ids, attention_mask, injection_layer, strength,
+            hook_factory, n_layers, device)
+        if save_sg_cache and sg_file:
+            save_tangent_data(tangent_data, sg_file)
+            print(f"  SG cached: {sg_file}")
+
+    # Combine
+    rows = combine_ga_sg_to_sa(
+        grad_data, act_data, tangent_data, sae_cache, cut,
+        injection_layer, n_layers, seq_len, base_meta, device, compute_remainder)
+
+    # Save
+    out_path = output_dir / strength_str / output_filename.format(trial_num=trial_num)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if rows:
         pd.DataFrame(rows).to_parquet(out_path, index=False)
         print(f"  Saved {len(rows)} rows to {out_path}")
+    torch.cuda.empty_cache()
     return out_path
 
 
-def extract_feature_target_sa(
-    model_wrapper: ModelWrapper,
-    concept: str,
-    concept_vector: torch.Tensor,
-    injection_layer: int,
-    strength: float,
-    target_layer: int,
-    target_sae_type: str,
-    target_feature_id: int,
-    target_token_pos: int,
-    output_dir: Path,
-    trial_num: int = 1,
-    sae_width: str = DEFAULT_SAE_WIDTH,
-    sae_l0: str = DEFAULT_SAE_L0,
-    device: str = "cuda",
-    sg_cache_dir: Optional[Path] = None,
-) -> Optional[Path]:
-    """Extract feature-targeted SA (loss = target feature activation).
+# Convenience wrappers
 
-    If sg_cache_dir is set and contains cached SG from hop-0, skips JVP pass entirely.
-    Returns path to output parquet, or None on failure.
+def extract_steering_attribution(
+    model_wrapper, concept, concept_vector, injection_layer, strength,
+    output_dir, trial_num=1, pos_token_id=12932, neg_token_id=3771,
+    sae_width=DEFAULT_SAE_WIDTH, sae_l0=DEFAULT_SAE_L0, device="cuda",
+    sg_cache_dir=None,
+):
+    """Extract root SA (logit-gap loss). Saves SG cache if sg_cache_dir is set."""
+    return extract_sa_for_strength(
+        model_wrapper, concept, concept_vector, injection_layer, strength,
+        output_dir, trial_num, pos_token_id, neg_token_id, sae_width, sae_l0, device,
+        sg_cache_dir=sg_cache_dir, save_sg_cache=True)
+
+
+def extract_feature_target_sa(
+    model_wrapper, concept, concept_vector, injection_layer, strength,
+    target_layer, target_sae_type, target_feature_id, target_token_pos,
+    output_dir, trial_num=1, sae_width=DEFAULT_SAE_WIDTH, sae_l0=DEFAULT_SAE_L0,
+    device="cuda", sg_cache_dir=None,
+):
+    """Extract feature-targeted SA. Loads SG from cache if available."""
+    seq_len = format_prompt(build_messages(trial_num), model_wrapper.tokenizer)[2]
+    loss_fn = make_feature_target_loss_fn(
+        target_layer, target_sae_type, target_feature_id, target_token_pos,
+        sae_width, sae_l0, model_wrapper.model_name, device, seq_len)
+    extra_meta = {"target_layer": target_layer, "target_sae_type": target_sae_type,
+                  "target_feature_id": target_feature_id, "target_token_pos": target_token_pos}
+    tgt_subdir = f"{target_sae_type}_L{target_layer}_F{target_feature_id}_T{target_token_pos}"
+    return extract_sa_for_strength(
+        model_wrapper, concept, concept_vector, injection_layer, strength,
+        output_dir / "feat_sa" / tgt_subdir, trial_num,
+        sae_width=sae_width, sae_l0=sae_l0, device=device,
+        loss_fn_maker=loss_fn, extra_meta=extra_meta,
+        output_filename="feat_sa_trial{trial_num}.parquet",
+        sg_cache_dir=sg_cache_dir, save_sg_cache=False, compute_remainder=False)
+
+
+# ── Forward SA orchestrator ─────────────────────────────────────────────────
+
+def extract_forward_sa_for_strength(
+    model_wrapper: ModelWrapper, concept: str, concept_vector: torch.Tensor,
+    injection_layer: int, strength: float,
+    source_layer: int, source_sae_type: str, source_feature_id: int, source_token_pos: int,
+    output_dir: Path, root_sa_dir: Optional[Path] = None,
+    trial_num: int = 1, sae_width: str = DEFAULT_SAE_WIDTH, sae_l0: str = DEFAULT_SAE_L0,
+    device: str = "cuda",
+) -> Optional[Path]:
+    """Forward SA: JVP from source decoder direction × GA_root.
+
+    steering_attribution = forward_jvp × GA_root per downstream feature.
     """
     import pandas as pd
 
-    target = {
-        "layer": target_layer, "sae_type": target_sae_type,
-        "feature_id": target_feature_id, "token_pos": target_token_pos,
-    }
-    rows = _extract_sa_core(
-        model_wrapper, concept, concept_vector, injection_layer, strength,
-        trial_num, sae_width, sae_l0, device,
-        target=target, compute_remainder=False, sg_cache_dir=sg_cache_dir,
-    )
+    tokenizer = model_wrapper.tokenizer
+    inner = model_wrapper.model
+    messages = build_messages(trial_num)
+    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
+    input_ids = input_ids.to(device)
+    attention_mask = torch.ones_like(input_ids).to(device)
+    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
+    n_layers = model_wrapper.n_layers
 
-    tgt_subdir = f"{target_sae_type}_L{target_layer}_F{target_feature_id}_T{target_token_pos}"
+    cut = AdditiveLayerCut()
+    steering_vec = concept_vector.to(device).float()
+    hook_factory = cut.make_steering_hook(steering_vec, steering_start)
+
+    # Load source w_dec
+    src_load_type = SAE_TYPE_LOAD_MAP.get(source_sae_type, source_sae_type)
+    model_size = _model_name_to_sae_size(model_wrapper.model_name)
+    src_sae = load_sae(source_layer, sae_width, sae_l0, src_load_type, model_size, True, device)
+    source_dec_vec = src_sae.w_dec[source_feature_id].detach().clone()
+    del src_sae
+    torch.cuda.empty_cache()
+
+    sae_cache = preload_saes(n_layers, model_wrapper.model_name, sae_width, sae_l0, "cpu",
+                             layer_indices=set(range(source_layer, n_layers)))
+
+    # Forward JVP pass
+    fwd_tangent_data = compute_forward_jvp_pass(
+        inner, input_ids, attention_mask, injection_layer, strength,
+        hook_factory, source_layer, source_dec_vec, source_sae_type, n_layers, device)
+
+    # Load GA_root from root SA parquet at this strength
+    root_df = None
+    if root_sa_dir is not None:
+        s_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
+        for t in [trial_num, 1, 2]:
+            candidate = root_sa_dir / s_str / f"sa_trial{t}.parquet"
+            if candidate.exists():
+                root_df = pd.read_parquet(candidate, columns=[
+                    "layer", "sae_type", "feature_id", "token_pos", "gradient_attribution"])
+                break
+
+    # Combine: forward_jvp × GA_root
+    base_meta = {"concept": concept, "injection_layer": injection_layer,
+                 "injection_strength": strength, "trial_num": trial_num,
+                 "source_layer": source_layer, "source_sae_type": source_sae_type,
+                 "source_feature_id": source_feature_id, "source_token_pos": source_token_pos}
+
+    rows: List[Dict[str, Any]] = []
+    with torch.no_grad():
+        for li in sorted(set(l for l, _ in sae_cache if l > source_layer)):
+            for st in SAE_TYPES:
+                in_sfx = SAE_TYPE_KEYS[st][0]
+                lt = SAE_TYPE_LOAD_MAP.get(st, st)
+                if (li, lt) not in sae_cache or (li, in_sfx) not in fwd_tangent_data:
+                    continue
+
+                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
+                dx = fwd_tangent_data[(li, in_sfx)].to(device).float()
+                if dx.dim() == 3:
+                    dx = dx[0]
+                fwd_jvp = dx @ sae.w_enc
+
+                ga_root: Dict[Tuple[int, int], float] = {}
+                if root_df is not None:
+                    lr = root_df[(root_df["layer"] == li) & (root_df["sae_type"] == st)]
+                    for _, row in lr.iterrows():
+                        ga_root[(int(row["token_pos"]), int(row["feature_id"]))] = float(row["gradient_attribution"])
+
+                nonzero = (fwd_jvp.abs() > 1e-8).nonzero(as_tuple=True)
+                if len(nonzero[0]) > 0:
+                    toks = nonzero[0].cpu().tolist()
+                    feats = nonzero[1].cpu().tolist()
+                    jvp_vals = fwd_jvp[nonzero[0], nonzero[1]].cpu().tolist()
+                    for tok, fid, jvp_val in zip(toks, feats, jvp_vals):
+                        ga_val = ga_root.get((tok, fid), 0.0)
+                        if abs(ga_val) < 1e-10:
+                            continue
+                        rows.append({
+                            **base_meta, "layer": li, "token_pos": tok,
+                            "sae_type": st, "feature_id": fid,
+                            "forward_jvp": jvp_val, "gradient_attribution": ga_val,
+                            "steering_attribution": jvp_val * ga_val,
+                        })
+                sae.to("cpu")
+                torch.cuda.empty_cache()
+
+    del fwd_tangent_data
+    torch.cuda.empty_cache()
+
+    src_subdir = f"fwd_{source_sae_type}_L{source_layer}_F{source_feature_id}_T{source_token_pos}"
     s_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
-    out_path = output_dir / "feat_sa" / tgt_subdir / s_str / f"feat_sa_trial{trial_num}.parquet"
+    out_path = output_dir / "feat_sa" / src_subdir / s_str / f"feat_sa_trial{trial_num}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if rows:
         pd.DataFrame(rows).to_parquet(out_path, index=False)
     return out_path
-
 
 # =============================================================================
 # Section A: ISA Computation
@@ -1685,180 +1784,6 @@ def select_features_from_edge_weights(
 # Section B: Graph Construction (backward + forward tracing)
 # =============================================================================
 
-def extract_forward_sa(
-    model_wrapper: ModelWrapper,
-    concept: str,
-    concept_vector: torch.Tensor,
-    injection_layer: int,
-    strength: float,
-    source_layer: int,
-    source_sae_type: str,
-    source_feature_id: int,
-    source_token_pos: int,
-    output_dir: Path,
-    root_sa_dir: Optional[Path] = None,
-    trial_num: int = 1,
-    sae_width: str = DEFAULT_SAE_WIDTH,
-    sae_l0: str = DEFAULT_SAE_L0,
-    device: str = "cuda",
-) -> Optional[Path]:
-    """Forward SA: JVP from source decoder direction × GA_root → downstream SA.
-
-    Like backward SA (GA × SG), forward SA computes two factors per downstream feature:
-      forward_jvp = ∂x/∂t · w_enc  (how source perturbation affects downstream feature)
-      GA_root = ∂L/∂x · w_dec      (how downstream feature affects root loss, from cache)
-      steering_attribution = forward_jvp × GA_root
-
-    This ensures compute_edge_weights works uniformly for backward and forward:
-      backward ew = ∫ GA_root(target) × SA_backward dα
-      forward ew  = ∫ SG(source) × SA_forward dα
-    where SA_forward already includes GA_root.
-    """
-    import pandas as pd
-
-    ctx = _prepare_sa_context(model_wrapper, concept_vector, trial_num, device)
-    n_layers = ctx.n_layers
-    layer_lo = source_layer + 1  # downstream of source
-
-    # Load source w_dec
-    src_load_type = SAE_TYPE_LOAD_MAP.get(source_sae_type, source_sae_type)
-    src_sae = load_sae(source_layer, sae_width, sae_l0, src_load_type, ctx.model_size, True, device)
-    source_dec_vec = src_sae.w_dec[source_feature_id].detach().clone().to(device).float()
-    src_sae.to("cpu")
-
-    sae_cache = _preload_saes(layer_lo, n_layers, sae_width, sae_l0, ctx.model_size)
-
-    # Load GA_root from root SA parquet at this strength
-    root_df = None
-    if root_sa_dir is not None:
-        strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
-        for t in [trial_num, 1, 2]:
-            candidate = root_sa_dir / strength_str / f"sa_trial{t}.parquet"
-            if candidate.exists():
-                root_df = pd.read_parquet(candidate, columns=[
-                    "layer", "sae_type", "feature_id", "token_pos", "gradient_attribution"])
-                break
-
-    # Determine perturbation hook site based on SAE type
-    if source_sae_type == "attn_out_all":
-        src_module = ctx.layers_module[source_layer].self_attn.o_proj
-    elif source_sae_type in ("transcoder_all", "mlp_out_all"):
-        src_module = getattr(ctx.layers_module[source_layer], "post_feedforward_layernorm",
-                             ctx.layers_module[source_layer])
-    else:
-        src_module = ctx.layers_module[source_layer]
-
-    # JVP: tangent = w_dec[source] at source layer, steering fixed
-    t_primal = torch.tensor(0.0, dtype=torch.float32, device=device)
-    t_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
-
-    def jvp_forward_fwd(t_val):
-        perturbation = source_dec_vec * t_val
-
-        steer_h = ctx.layers_module[injection_layer].register_forward_hook(
-            _make_steering_hook(ctx, torch.tensor(strength, dtype=torch.float32, device=device)))
-
-        def src_hook(module, input, output):
-            h = output[0] if isinstance(output, tuple) else output
-            rest = output[1:] if isinstance(output, tuple) else ()
-            p = perturbation.unsqueeze(0).unsqueeze(0).expand_as(h)
-            return (h + p,) + rest if isinstance(output, tuple) else h + p
-        src_h = src_module.register_forward_hook(src_hook)
-
-        act_hooks = ActivationHooks(ctx.inner, retain_grad=False)
-        act_hooks.register_hooks(list(range(layer_lo, n_layers)), CAPTURE_TYPES_SAE)
-        try:
-            with act_hooks:
-                ctx.inner.eval()
-                _ = ctx.inner(input_ids=ctx.input_ids, attention_mask=ctx.attention_mask,
-                              output_hidden_states=False, return_dict=True)
-        finally:
-            steer_h.remove()
-            src_h.remove()
-            act_hooks.remove_hooks()
-
-        raw = act_hooks.get_activations()
-        result = []
-        for li in range(layer_lo, n_layers):
-            for sfx in JVP_SITE_SUFFIXES:
-                ak = _act_key(li, sfx)
-                t = raw[ak][0] if ak in raw and raw[ak] else torch.zeros(1, device=device)
-                if isinstance(t, (list, tuple)):
-                    t = t[0]
-                result.append(t[0] if t.dim() == 3 else t)
-        return result
-
-    tangent_data = _run_jvp_and_collect_tangents(
-        ctx, t_primal, t_tangent, jvp_forward_fwd, layer_lo, n_layers)
-
-    # Combine: forward_jvp × GA_root per downstream feature
-    base_meta = {
-        "concept": concept, "injection_layer": injection_layer,
-        "injection_strength": strength, "trial_num": trial_num,
-        "source_layer": source_layer, "source_sae_type": source_sae_type,
-        "source_feature_id": source_feature_id, "source_token_pos": source_token_pos,
-    }
-    rows: List[Dict[str, Any]] = []
-
-    with torch.no_grad():
-        for li in range(layer_lo, n_layers):
-            for st in SAE_TYPES:
-                in_sfx = SAE_TYPE_KEYS[st][0]
-                lt = SAE_TYPE_LOAD_MAP.get(st, st)
-                if (li, lt) not in sae_cache:
-                    continue
-                tkey = (li, in_sfx)
-                if tkey not in tangent_data:
-                    continue
-                dx = tangent_data[tkey].to(device).float()
-                if dx.dim() == 3:
-                    dx = dx[0]
-
-                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
-                fwd_jvp = dx @ sae.w_enc  # [seq_len, d_sae]
-
-                # Build GA_root lookup for this (layer, sae_type)
-                ga_root_lookup: Dict[Tuple[int, int], float] = {}
-                if root_df is not None:
-                    layer_root = root_df[(root_df["layer"] == li) & (root_df["sae_type"] == st)]
-                    for _, row in layer_root.iterrows():
-                        ga_root_lookup[(int(row["token_pos"]), int(row["feature_id"]))] = float(row["gradient_attribution"])
-
-                # Find nonzero JVP entries and multiply by GA_root
-                nonzero = (fwd_jvp.abs() > 1e-8).nonzero(as_tuple=True)
-                if len(nonzero[0]) > 0:
-                    tok_indices = nonzero[0].cpu().tolist()
-                    feat_indices = nonzero[1].cpu().tolist()
-                    jvp_vals = fwd_jvp[nonzero[0], nonzero[1]].cpu().tolist()
-
-                    for tok_pos, fid, jvp_val in zip(tok_indices, feat_indices, jvp_vals):
-                        ga_root_val = ga_root_lookup.get((tok_pos, fid), 0.0)
-                        if abs(ga_root_val) < 1e-10:
-                            continue
-                        rows.append({
-                            **base_meta, "layer": li, "token_pos": tok_pos,
-                            "sae_type": st, "feature_id": fid,
-                            "forward_jvp": jvp_val,
-                            "gradient_attribution": ga_root_val,
-                            "steering_attribution": jvp_val * ga_root_val,
-                        })
-
-                sae.to("cpu")
-                torch.cuda.empty_cache()
-
-    del tangent_data
-    torch.cuda.empty_cache()
-
-    # Save
-    src_subdir = f"fwd_{source_sae_type}_L{source_layer}_F{source_feature_id}_T{source_token_pos}"
-    s_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
-    out_path = output_dir / "feat_sa" / src_subdir / s_str / f"feat_sa_trial{trial_num}.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if rows:
-        pd.DataFrame(rows).to_parquet(out_path, index=False)
-    return out_path
-
-
 def build_attribution_graph(
     model_wrapper: ModelWrapper,
     concept: str,
@@ -1984,7 +1909,7 @@ def build_attribution_graph(
             for source in fwd_sources:
                 print(f"    {source.short_name()}...")
                 for s in tqdm(feat_sa_strengths, desc=f"    fwd SA", leave=False):
-                    extract_forward_sa(
+                    extract_forward_sa_for_strength(
                         model_wrapper, concept, concept_vector,
                         injection_layer, s,
                         source.layer, source.sae_type, source.feature_id, source.token_pos,
