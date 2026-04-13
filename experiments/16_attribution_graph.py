@@ -1550,13 +1550,20 @@ def compute_edge_weights(
     optimal_strength: float,
     target: Optional[FeatureNode] = None,
     root_sa_dir: Optional[Path] = None,
+    weighting_curve: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[Dict[Tuple, float]]:
-    """Compute GA-weighted edge weights using Simpson's rule.
+    """Compute weighted edge weights using Simpson's rule.
 
-    For hop-0 (target=None): ew(f) = ∫₀^s* SA(f, α) dα  (GA_root = 1)
-    For hop-1+ (target=feature): ew(f→target) = ∫₀^s* GA_root(target, α) · SA(f→target, α) dα
+    For hop-0 (target=None): ew(f) = ∫₀^s* SA(f, α) dα  (weight = 1)
+    For backward hop-1+: ew(f→target) = ∫₀^s* GA_root(target, α) · SA(f→target, α) dα
+    For forward hop-1+: ew(source→g) = ∫₀^s* SG(source, α) · SA_fwd(g, α) dα
 
-    Uses scipy.integrate.simpson for cubic interpolation accuracy.
+    Args:
+        target: Feature node for SA subdirectory lookup (None = root).
+        root_sa_dir: Root SA dir for loading GA_root curve (backward hop-1+).
+        weighting_curve: Explicit (strengths, values) curve to weight the integrand.
+                        If provided, overrides GA_root loading. Use for forward tracing
+                        (pass SG curve) or any custom weighting.
     """
     import pandas as pd
     from scipy.integrate import simpson
@@ -1616,19 +1623,25 @@ def compute_edge_weights(
     sa_matrix = sa_wide.values  # [n_features, n_strengths]
     strengths_arr = np.array(sorted_strengths)
 
-    # Load GA_root curve for target (hop-1+ only)
-    if not is_root and root_sa_dir is not None:
+    # Load weighting curve (GA_root for backward, SG for forward, or explicit)
+    if weighting_curve is not None:
+        w_strengths, w_values = weighting_curve
+        if len(w_strengths) >= 2:
+            weight_interp = np.interp(sorted_strengths, w_strengths, w_values)
+        else:
+            weight_interp = np.ones(len(sorted_strengths))
+    elif not is_root and root_sa_dir is not None:
         ga_strengths, ga_values = _load_curve_from_root_sa(
             root_sa_dir, trial_nums, target, "gradient_attribution")
         if len(ga_strengths) >= 2:
-            ga_interp = np.interp(sorted_strengths, ga_strengths, ga_values)
+            weight_interp = np.interp(sorted_strengths, ga_strengths, ga_values)
         else:
-            ga_interp = np.ones(len(sorted_strengths))
+            weight_interp = np.ones(len(sorted_strengths))
     else:
-        ga_interp = np.ones(len(sorted_strengths))
+        weight_interp = np.ones(len(sorted_strengths))
 
-    # GA-weighted integration with Simpson's rule (vectorized)
-    integrand = sa_matrix * ga_interp[np.newaxis, :]
+    # Weighted integration with Simpson's rule (vectorized)
+    integrand = sa_matrix * weight_interp[np.newaxis, :]
     edge_weights_arr = simpson(integrand, x=strengths_arr, axis=1)
 
     # Build result dict
@@ -1683,15 +1696,23 @@ def extract_forward_sa(
     source_feature_id: int,
     source_token_pos: int,
     output_dir: Path,
+    root_sa_dir: Optional[Path] = None,
     trial_num: int = 1,
     sae_width: str = DEFAULT_SAE_WIDTH,
     sae_l0: str = DEFAULT_SAE_L0,
     device: str = "cuda",
 ) -> Optional[Path]:
-    """Forward SA: JVP from source feature's decoder direction → downstream features.
+    """Forward SA: JVP from source decoder direction × GA_root → downstream SA.
 
-    Reuses _prepare_sa_context, _preload_saes, _run_jvp_and_collect_tangents,
-    and _project_tangents_to_features from the shared SA infrastructure.
+    Like backward SA (GA × SG), forward SA computes two factors per downstream feature:
+      forward_jvp = ∂x/∂t · w_enc  (how source perturbation affects downstream feature)
+      GA_root = ∂L/∂x · w_dec      (how downstream feature affects root loss, from cache)
+      steering_attribution = forward_jvp × GA_root
+
+    This ensures compute_edge_weights works uniformly for backward and forward:
+      backward ew = ∫ GA_root(target) × SA_backward dα
+      forward ew  = ∫ SG(source) × SA_forward dα
+    where SA_forward already includes GA_root.
     """
     import pandas as pd
 
@@ -1706,6 +1727,17 @@ def extract_forward_sa(
     src_sae.to("cpu")
 
     sae_cache = _preload_saes(layer_lo, n_layers, sae_width, sae_l0, ctx.model_size)
+
+    # Load GA_root from root SA parquet at this strength
+    root_df = None
+    if root_sa_dir is not None:
+        strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
+        for t in [trial_num, 1, 2]:
+            candidate = root_sa_dir / strength_str / f"sa_trial{t}.parquet"
+            if candidate.exists():
+                root_df = pd.read_parquet(candidate, columns=[
+                    "layer", "sae_type", "feature_id", "token_pos", "gradient_attribution"])
+                break
 
     # Determine perturbation hook site based on SAE type
     if source_sae_type == "attn_out_all":
@@ -1759,15 +1791,60 @@ def extract_forward_sa(
     tangent_data = _run_jvp_and_collect_tangents(
         ctx, t_primal, t_tangent, jvp_forward_fwd, layer_lo, n_layers)
 
-    # Project tangents onto SAE encoder directions (reuse shared helper)
+    # Combine: forward_jvp × GA_root per downstream feature
     base_meta = {
         "concept": concept, "injection_layer": injection_layer,
         "injection_strength": strength, "trial_num": trial_num,
         "source_layer": source_layer, "source_sae_type": source_sae_type,
         "source_feature_id": source_feature_id, "source_token_pos": source_token_pos,
     }
-    rows = _project_tangents_to_features(
-        tangent_data, sae_cache, layer_lo, n_layers, device, base_meta)
+    rows: List[Dict[str, Any]] = []
+
+    with torch.no_grad():
+        for li in range(layer_lo, n_layers):
+            for st in SAE_TYPES:
+                in_sfx = SAE_TYPE_KEYS[st][0]
+                lt = SAE_TYPE_LOAD_MAP.get(st, st)
+                if (li, lt) not in sae_cache:
+                    continue
+                tkey = (li, in_sfx)
+                if tkey not in tangent_data:
+                    continue
+                dx = tangent_data[tkey].to(device).float()
+                if dx.dim() == 3:
+                    dx = dx[0]
+
+                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
+                fwd_jvp = dx @ sae.w_enc  # [seq_len, d_sae]
+
+                # Build GA_root lookup for this (layer, sae_type)
+                ga_root_lookup: Dict[Tuple[int, int], float] = {}
+                if root_df is not None:
+                    layer_root = root_df[(root_df["layer"] == li) & (root_df["sae_type"] == st)]
+                    for _, row in layer_root.iterrows():
+                        ga_root_lookup[(int(row["token_pos"]), int(row["feature_id"]))] = float(row["gradient_attribution"])
+
+                # Find nonzero JVP entries and multiply by GA_root
+                nonzero = (fwd_jvp.abs() > 1e-8).nonzero(as_tuple=True)
+                if len(nonzero[0]) > 0:
+                    tok_indices = nonzero[0].cpu().tolist()
+                    feat_indices = nonzero[1].cpu().tolist()
+                    jvp_vals = fwd_jvp[nonzero[0], nonzero[1]].cpu().tolist()
+
+                    for tok_pos, fid, jvp_val in zip(tok_indices, feat_indices, jvp_vals):
+                        ga_root_val = ga_root_lookup.get((tok_pos, fid), 0.0)
+                        if abs(ga_root_val) < 1e-10:
+                            continue
+                        rows.append({
+                            **base_meta, "layer": li, "token_pos": tok_pos,
+                            "sae_type": st, "feature_id": fid,
+                            "forward_jvp": jvp_val,
+                            "gradient_attribution": ga_root_val,
+                            "steering_attribution": jvp_val * ga_root_val,
+                        })
+
+                sae.to("cpu")
+                torch.cuda.empty_cache()
 
     del tangent_data
     torch.cuda.empty_cache()
@@ -1911,40 +1988,29 @@ def build_attribution_graph(
                         model_wrapper, concept, concept_vector,
                         injection_layer, s,
                         source.layer, source.sae_type, source.feature_id, source.token_pos,
-                        output_dir, trial_num=trial_nums[0], device=device,
+                        output_dir, root_sa_dir=root_sa_dir,
+                        trial_num=trial_nums[0], device=device,
                     )
 
-            # Compute SG-weighted edge weights (symmetric: use SG instead of GA)
+            # Compute SG-weighted edge weights: ∫ SG(source,α) × SA_fwd(α) dα
             next_sources = []
             for source in fwd_sources:
-                # For forward: target subdir uses fwd_ prefix
-                src_subdir = f"fwd_{source.sae_type}_L{source.layer}_F{source.feature_id}_T{source.token_pos}"
-                scan_dir = output_dir / "feat_sa" / src_subdir
-                if not scan_dir.exists():
-                    continue
-
                 # Load SG curve for source from root SA
-                sg_strengths, sg_values = _load_curve_from_root_sa(
+                sg_curve = _load_curve_from_root_sa(
                     root_sa_dir, trial_nums, source, "steering_grad")
 
-                # Compute edge weights with SG weighting
+                # Forward parquets use fwd_ prefix in subdir
+                fwd_node = FeatureNode(source.layer, f"fwd_{source.sae_type}",
+                                       source.feature_id, source.token_pos, 0, 0)
                 ew = compute_edge_weights(
                     output_dir, trial_nums, optimal_strength,
-                    target=FeatureNode(source.layer, source.sae_type, source.feature_id,
-                                       source.token_pos, 0, 0),
-                    root_sa_dir=None)  # No GA weighting for forward; handled below
+                    target=fwd_node, weighting_curve=sg_curve)
 
                 if not ew:
                     continue
-                # Apply SG weighting (approximation: multiply by mean SG)
-                if len(sg_values) >= 2:
-                    sg_mean = float(np.mean(np.abs(sg_values)))
-                else:
-                    sg_mean = 1.0
 
                 selected = select_features_from_edge_weights(
-                    {k: v * sg_mean for k, v in ew.items()},
-                    mpt, frac_of_max, source.layer + 1)
+                    ew, mpt, frac_of_max, source.layer + 1)
                 for key, w in selected:
                     if key not in visited_fwd:
                         node = FeatureNode(key[0], key[1], key[2], key[3], w, hop=hop+1)
