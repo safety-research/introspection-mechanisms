@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 50: Feature-Centric Subset Analysis
+Transcoder Feature Analysis: Feature-Centric Subset Analysis
 
 For each top feature identified in the additional analysis, this script:
 1. Finds the top-K concepts where this feature activates most strongly
@@ -11,7 +11,7 @@ The hypothesis: Features may be strongly predictive for specific concept subsets
 but signal gets diluted when averaging across all 500 concepts.
 
 Output:
-    analysis/exp50_feature_centric_analysis/
+    analysis/08_feature_centric_analysis/
     └── {config}/
         ├── feature_subset_correlations.csv       # Main results for all K values
         ├── top_concepts_per_feature.json         # Which concepts each feature fires on
@@ -70,11 +70,11 @@ def wrap_label(physical_feature: str, label: str, max_width: int = 45) -> str:
 # Configuration
 # =============================================================================
 
-CACHED_ACTIVATIONS_PATH = Path("analysis/exp50_cached_activations")
-EXP21_RESULTS_PATH = Path("analysis/exp21_more_concepts_steering/gemma3_27b")
-ADDITIONAL_ANALYSIS_PATH = Path("analysis/exp50_additional_analysis")
-OUTPUT_BASE = Path("analysis/exp50_feature_centric_analysis")
-FEATURE_LABELS_PATH = Path("/workspace/anthropic-fellows/gemma-scope-2/feature_labels")
+CACHED_ACTIVATIONS_PATH = Path("analysis/08_cached_activations")
+STEERING_RESULTS_PATH = Path("analysis/02b_steering_500_concepts/gemma3_27b")
+ADDITIONAL_ANALYSIS_PATH = Path("analysis/08_additional_analysis")
+OUTPUT_BASE = Path("analysis/08_feature_centric_analysis")
+FEATURE_LABELS_PATH = Path("gemma-scope-2/feature_labels")
 
 # K values to try for subset analysis (including very small values)
 K_VALUES = [1, 3, 5, 10, 15, 20, 25, 50, 100, 150, 200]
@@ -86,15 +86,18 @@ MIN_K_ROBUST = 10
 
 # Configs to analyze (layer, strength pairs)
 CONFIGS = [
-    (35, 2.0),
-    (35, 4.0),
-    (38, 2.0),
-    (38, 4.0),
-    (44, 2.0),
-    (44, 4.0),
+    (37, 4.0),
 ]
 
-# Concept categories (parsed from exp21_more_concepts_list.py)
+# Extended configs for multi-layer analysis (require regenerating cached activations)
+ALL_CONFIGS = [
+    (35, 2.0), (35, 4.0),
+    (37, 2.0), (37, 4.0),
+    (38, 2.0), (38, 4.0),
+    (44, 2.0), (44, 4.0),
+]
+
+# Concept categories (parsed from 02b_concepts_list.py)
 CONCEPT_CATEGORIES = {
     "ANIMALS": [
         "Elephants", "Dolphins", "Eagles", "Serpents", "Wolves", "Koalas", "Octopuses", "Penguins",
@@ -239,7 +242,7 @@ def parse_physical_feature(physical_feature: str) -> Tuple[int, int]:
     raise ValueError(f"Invalid physical_feature format: {physical_feature}")
 
 
-def physical_to_index(physical_feature: str, layers: List[int], n_features: int = 16384) -> int:
+def physical_to_index(physical_feature: str, layers: List[int], n_features: int = 262144) -> int:
     """Convert physical feature ID to global array index."""
     layer, feat_id = parse_physical_feature(physical_feature)
     if layer not in layers:
@@ -329,22 +332,141 @@ def load_cached_activations(
     return concept_activations, concepts, layers
 
 
+def discover_cached_strengths(
+    steering_layer: int,
+    token_mode: str,
+    transcoder_l0: str,
+    base_model: bool = False,
+    model_variant: Optional[str] = None,
+    transcoder_width: str = "16k",
+) -> Dict[float, Path]:
+    """Discover cached activation files for different steering strengths."""
+    strengths = {}
+    prefix = f"L{steering_layer}_S"
+    width_prefix = f"{transcoder_width}_" if transcoder_width != "16k" else ""
+    suffix = f"_{token_mode}_{width_prefix}{transcoder_l0}"
+    if model_variant:
+        suffix += f"_{model_variant}"
+    elif base_model:
+        suffix += "_base_model"
+    for cache_dir in CACHED_ACTIVATIONS_PATH.iterdir():
+        if not cache_dir.is_dir():
+            continue
+        name = cache_dir.name
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        parts = name.split("_")
+        if len(parts) < 4:
+            continue
+        strength_str = parts[1][1:]
+        try:
+            strength = float(strength_str)
+        except ValueError:
+            continue
+        cache_file = cache_dir / "steered_activations.pt"
+        if cache_file.exists():
+            strengths[strength] = cache_file
+    return strengths
+
+
+def get_layer_matrix_cached(
+    cache_file: Path,
+    layer: int,
+    cached_data: Optional[dict] = None,
+    activation_dtype: Optional[np.dtype] = None,
+    cache_store: Optional[dict] = None,
+    use_trial1: bool = False,
+    use_fast_layer_matrices: bool = False,
+    show_progress: bool = False,
+) -> Tuple[List[str], np.ndarray, Dict[str, int]]:
+    """Load and return (concepts, matrix, concept_to_idx) for a single layer from cache."""
+    cache_key = (str(cache_file), layer, bool(use_trial1))
+    if cache_store is not None and cache_key in cache_store:
+        return cache_store[cache_key]
+    if use_fast_layer_matrices:
+        matrix_dir = cache_file.parent / "layer_matrices"
+        suffix = "trial1" if use_trial1 else "mean"
+        matrix_file = matrix_dir / f"layer_{layer}_{suffix}.npz"
+        if matrix_file.exists() and matrix_file.stat().st_mtime >= cache_file.stat().st_mtime:
+            try:
+                with np.load(matrix_file, allow_pickle=False) as data:
+                    concepts = data["concepts"] if "concepts" in data else np.array([], dtype=str)
+                    matrix = data["matrix"] if "matrix" in data else np.zeros((0, 0), dtype=np.float16)
+            except Exception:
+                concepts = None
+                matrix = None
+            if concepts is not None and matrix is not None:
+                kept = [str(c) for c in concepts.tolist()] if concepts.size else []
+                if activation_dtype is not None and matrix.dtype != activation_dtype:
+                    matrix = matrix.astype(activation_dtype, copy=False)
+                concept_to_idx = {c: i for i, c in enumerate(kept)}
+                result = (kept, matrix.astype(np.float32, copy=False), concept_to_idx)
+                if cache_store is not None:
+                    cache_store[cache_key] = result
+                return result
+    data = cached_data if cached_data is not None else torch.load(cache_file, weights_only=False)
+    activations = data["activations"]
+    concepts = data.get("concepts", [])
+    kept = []
+    rows = []
+    for concept in concepts:
+        raw = activations.get(concept, {}).get(layer)
+        if raw is None:
+            continue
+        kept.append(concept)
+        layer_acts = _ensure_dense(raw).float().numpy()
+        if use_trial1:
+            rows.append(layer_acts[0] if layer_acts.ndim > 1 else layer_acts)
+        else:
+            rows.append(layer_acts.mean(axis=0) if layer_acts.ndim > 1 else layer_acts)
+    if rows:
+        matrix = np.stack(rows)
+    else:
+        matrix = np.zeros((0, 0), dtype=np.float32)
+    if activation_dtype is not None and matrix.dtype != activation_dtype:
+        matrix = matrix.astype(activation_dtype, copy=False)
+    concept_to_idx = {c: i for i, c in enumerate(kept)}
+    result = (kept, matrix, concept_to_idx)
+    if cache_store is not None:
+        cache_store[cache_key] = result
+    return result
+
+
+def get_control_cache_file(
+    token_mode: str,
+    transcoder_l0: str,
+    base_model: bool = False,
+    model_variant: Optional[str] = None,
+    transcoder_width: str = "16k",
+) -> Optional[Path]:
+    """Get control (no-steering) cache file path."""
+    width_prefix = f"{transcoder_width}_" if transcoder_width != "16k" else ""
+    dir_name = f"control_{token_mode}_{width_prefix}{transcoder_l0}"
+    if model_variant:
+        dir_name += f"_{model_variant}"
+    elif base_model:
+        dir_name += "_base_model"
+    control_dir = CACHED_ACTIVATIONS_PATH / dir_name
+    control_file = control_dir / "control_activations.pt"
+    return control_file if control_file.exists() else None
+
+
 def load_detection_rates(
     steering_layer: int,
     steering_strength: float,
     metric_type: str = "detection_rate",
 ) -> Dict[str, float]:
     """
-    Load per-concept detection rates from exp21 results.
+    Load per-concept detection rates from experiment 02 (steering evaluation) results.
 
     Returns:
         Dict mapping concept name -> detection rate (0-1)
     """
-    exp21_dir = EXP21_RESULTS_PATH / f"layer_{steering_layer}_strength_{steering_strength}"
-    results_file = exp21_dir / "results.csv"
+    steering_dir = STEERING_RESULTS_PATH / f"layer_{steering_layer}_strength_{steering_strength}"
+    results_file = steering_dir / "results.csv"
 
     if not results_file.exists():
-        raise FileNotFoundError(f"Exp21 results not found: {results_file}")
+        raise FileNotFoundError(f"Experiment 02 (steering evaluation) results not found: {results_file}")
 
     print(f"  Loading detection rates from {results_file}...")
     df = pd.read_csv(results_file)
@@ -430,7 +552,7 @@ def get_top_features_by_variance(
     detection_rates: Dict[str, float],
     layers: List[int],
     n_features: int = 5000,
-    n_features_per_layer: int = 16384,
+    n_features_per_layer: int = 262144,
 ) -> Tuple[List[str], List[str]]:
     """
     Get top features by variance across concepts AND by correlation strength.
@@ -1674,7 +1796,7 @@ def compute_feature_contrast(
             continue  # Skip configs that don't have this layer
 
         layer_idx = config_layers.index(layer)
-        n_features = 16384  # Features per layer
+        n_features = 262144  # Features per layer (262k transcoder width)
 
         for concept, acts in concept_acts.items():
             # Extract activation for this specific feature
@@ -1927,7 +2049,7 @@ def plot_pooled_scatter(
                 continue
 
             layer_idx = config_layers.index(layer)
-            n_features_per_layer = 16384
+            n_features_per_layer = 262144
 
             for concept, acts in concept_acts.items():
                 feat_activation = acts[layer_idx * n_features_per_layer + feat_id]
@@ -2069,7 +2191,7 @@ def run_pooled_analysis(
 
     # Option 2: Add high-variance features from common layers
     print(f"\n[2/5] Selecting top features by variance from common layers...")
-    n_features_per_layer = 16384
+    n_features_per_layer = 262144
 
     # For each common layer, compute variance across all pooled data
     for layer in common_layers:

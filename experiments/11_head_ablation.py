@@ -2,19 +2,19 @@
 """
 Exp51: Mean Ablation of Identified Attention Heads
 
-Run mean ablation experiments on attention heads identified in exp51_head_investigation.
+Run mean ablation experiments on attention heads identified in 12_head_investigation.
 Uses trial-number matched mean ablation:
 - Collect mean head outputs from control trials, grouped by trial number
 - During steered trials, patch heads with the mean from matching trial number
 - Only ablate during prompt processing (not generation)
 
 Head Selection:
-- Loads top 50 heads from exp51_head_investigation top50_classification.json
+- Loads top 50 heads from 12_head_investigation top50_classification.json
 - Separates into "beneficial" (positive attribution) and "detrimental" (negative attribution)
 - Ablates each group separately to test causal role
 
 Concept Selection:
-- Uses success/failure partition from exp4_vector_geometry
+- Uses success/failure partition from 04b_vector_geometry
 - Only runs on success concepts (those with introspection detection > threshold)
 
 Ablation Configurations:
@@ -51,21 +51,21 @@ def compute_se(p, n):
     return np.sqrt(p * (1 - p) / n) * 100  # Return as percentage
 
 
-def load_exp51_heads(
-    exp51_dir: str,
+def load_head_results(
+    head_dir: str,
     model_name: str,
     layer: int,
     strength: float,
     partition: str = "success"
 ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], Dict]:
     """
-    Load ALL heads from exp51_head_investigation attribution results, sorted by |attribution|.
+    Load ALL heads from 12_head_investigation attribution results, sorted by |attribution|.
 
     Uses the full attribution file (section_a/attribution_introspection.json) which has
     attribution scores for all 768 heads, not just the top 50.
 
     Args:
-        exp51_dir: Path to exp51_head_investigation results
+        head_dir: Path to 12_head_investigation results
         model_name: Model name (e.g., "gemma3_27b")
         layer: Steering layer index
         strength: Steering strength
@@ -78,7 +78,7 @@ def load_exp51_heads(
     """
     # Path to full attribution results
     attribution_path = (
-        Path(exp51_dir) / model_name /
+        Path(head_dir) / model_name /
         f"layer_{layer}_strength_{strength}" /
         "section_a" / partition / "attribution_introspection.json"
     )
@@ -118,16 +118,16 @@ def load_exp51_heads(
 
 
 def load_partition_concepts(
-    exp4_dir: str,
+    geometry_dir: str,
     model_name: str,
     layer: int,
     strength: float,
     partition: str = "success"
 ) -> List[str]:
-    """Load concepts from specified partition in exp4 subspace analysis.
+    """Load concepts from specified partition in experiment 04b (vector geometry) subspace analysis.
 
     Args:
-        exp4_dir: Path to exp4 results
+        geometry_dir: Path to experiment 04b (vector geometry) results
         model_name: Model name
         layer: Steering layer index
         strength: Steering strength
@@ -137,7 +137,7 @@ def load_partition_concepts(
         List of concept names in the specified partition
     """
     subspace_path = (
-        Path(exp4_dir) / model_name /
+        Path(geometry_dir) / model_name /
         f"layer_{layer}_strength_{strength}" /
         "subspace_analysis.json"
     )
@@ -153,19 +153,19 @@ def load_partition_concepts(
     else:
         concepts = data["failure_concepts"]
 
-    print(f"Loaded {len(concepts)} {partition} concepts from exp4")
+    print(f"Loaded {len(concepts)} {partition} concepts from experiment 04b (vector geometry)")
 
     return concepts
 
 
 def load_steering_vectors(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     layer: int,
     concepts: List[str]
 ) -> Dict[str, torch.Tensor]:
-    """Load steering vectors from exp21 for specified concepts."""
-    vectors_dir = Path(exp21_dir) / model_name / "vectors" / f"layer_{layer}"
+    """Load steering vectors from experiment 02 (steering evaluation) for specified concepts."""
+    vectors_dir = Path(steering_dir) / model_name / "vectors" / f"layer_{layer}"
 
     if not vectors_dir.exists():
         raise FileNotFoundError(f"Vectors directory not found: {vectors_dir}")
@@ -921,12 +921,12 @@ def generate_plots(results_path: Path, output_dir: Path):
 def main():
     parser = argparse.ArgumentParser(description="Exp51: Head Ablation Experiment")
     parser.add_argument("-m", "--model", type=str, default="gemma3_27b", help="Model name")
-    parser.add_argument("--exp51-dir", type=str, default="analysis/exp51_head_investigation",
-                        help="Path to exp51_head_investigation results")
-    parser.add_argument("--exp4-dir", type=str, default="analysis/exp4_vector_geometry",
-                        help="Path to exp4 for success/failure partition")
-    parser.add_argument("--exp21-dir", type=str, default="analysis/exp21_more_concepts_steering",
-                        help="Path to exp21 for steering vectors")
+    parser.add_argument("--head-dir", type=str, default="analysis/12_head_investigation",
+                        help="Path to 12_head_investigation results")
+    parser.add_argument("--geometry-dir", type=str, default="analysis/04b_vector_geometry",
+                        help="Path to experiment 04b (vector geometry) for success/failure partition")
+    parser.add_argument("--steering-dir", type=str, default="analysis/02b_steering_500_concepts",
+                        help="Path to experiment 02 (steering evaluation) for steering vectors")
     parser.add_argument("-l", "--layer", type=int, default=37, help="Steering layer index")
     parser.add_argument("-s", "--strength", type=float, default=4.0, help="Steering strength")
     parser.add_argument("--partition", type=str, default="success", choices=["success", "failure"],
@@ -937,7 +937,7 @@ def main():
                         help="Batch size for generation (default: 8)")
     parser.add_argument("--n-control-trials", type=int, default=3,
                         help="Control trials per concept for mean computation")
-    parser.add_argument("-o", "--output-dir", type=str, default="analysis/exp51_head_ablation",
+    parser.add_argument("-o", "--output-dir", type=str, default="analysis/11_head_ablation",
                         help="Output directory")
     parser.add_argument("--device", type=str, default="cuda", help="Device")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="Dtype")
@@ -996,12 +996,12 @@ def main():
     with open(output_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    # Load heads from exp51_head_investigation
+    # Load heads from 12_head_investigation
     print("\n" + "=" * 70)
     print(f"LOADING HEAD CLASSIFICATIONS ({args.partition.upper()} PARTITION)")
     print("=" * 70)
-    beneficial_heads, detrimental_heads, head_data = load_exp51_heads(
-        args.exp51_dir, args.model, args.layer, args.strength, args.partition
+    beneficial_heads, detrimental_heads, head_data = load_head_results(
+        args.head_dir, args.model, args.layer, args.strength, args.partition
     )
 
     print(f"\nHead summary ({args.partition} partition):")
@@ -1013,7 +1013,7 @@ def main():
     print(f"LOADING {args.partition.upper()} CONCEPTS FROM EXP4")
     print("=" * 70)
     partition_concepts = load_partition_concepts(
-        args.exp4_dir, args.model, args.layer, args.strength, args.partition
+        args.geometry_dir, args.model, args.layer, args.strength, args.partition
     )
 
     # Load steering vectors
@@ -1021,7 +1021,7 @@ def main():
     print("LOADING STEERING VECTORS")
     print("=" * 70)
     steering_vectors = load_steering_vectors(
-        args.exp21_dir, args.model, args.layer, partition_concepts
+        args.steering_dir, args.model, args.layer, partition_concepts
     )
     concepts = list(steering_vectors.keys())
     print(f"Using {len(concepts)} {args.partition} concepts with available vectors")
@@ -1158,7 +1158,7 @@ def main():
             "batch_size": args.batch_size,
             "n_concepts": len(concepts),
             "total_trials_per_condition": len(concepts) * min(args.trials_per_concept, 10),
-            "head_attribution_source": str(Path(args.exp51_dir) / args.model /
+            "head_attribution_source": str(Path(args.head_dir) / args.model /
                                               f"layer_{args.layer}_strength_{args.strength}" /
                                               "section_a" / args.partition / "attribution_introspection.json"),
             "n_beneficial_heads": len(beneficial_heads),
@@ -1184,7 +1184,7 @@ def main():
         "batch_size": args.batch_size,
         "n_concepts": len(concepts),
         "total_trials_per_condition": len(concepts) * min(args.trials_per_concept, 10),
-        "head_classification_source": str(Path(args.exp51_dir) / args.model /
+        "head_classification_source": str(Path(args.head_dir) / args.model /
                                           f"layer_{args.layer}_strength_{args.strength}" /
                                           "section_b" / args.partition / "top50_classification.json"),
         "n_beneficial_heads": len(beneficial_heads),

@@ -2,7 +2,7 @@
 Generate a grouped bar plot showing linear probe accuracy before vs after
 adding each attention head's output, for the top success heads.
 
-Data comes from exp30_qkv_decomposition: for each head, a linear probe was
+Data comes from 10_qkv_decomposition: for each head, a linear probe was
 trained on the residual stream before the head (h_before) and after adding
 the head's output (h_after = h_before + head_output). The probe predicts
 whether the model was steered (binary classification, 5-fold cross-validated).
@@ -29,7 +29,7 @@ plt.rcParams["ytick.color"] = "black"
 plt.rcParams["axes.edgecolor"] = "black"
 plt.rcParams["axes.labelcolor"] = "black"
 
-BASE_DIR = Path("analysis/exp30_qkv_decomposition/gemma3_27b/layer_37_strength_4.0/success")
+BASE_DIR = Path("analysis/10_qkv_decomposition/gemma3_27b/layer_37_strength_4.0/success")
 OUTPUT_DIR = Path("analysis/figures")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

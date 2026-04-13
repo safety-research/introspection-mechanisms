@@ -13,8 +13,10 @@ We test this across diverse prompt categories and evaluate with an LLM judge.
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 
@@ -312,8 +314,8 @@ class LLMJudge:
 # =============================================================================
 
 def load_mean_diff_direction(model_name: str) -> torch.Tensor:
-    """Load the mean-diff direction from exp4_vector_geometry."""
-    path = Path(f"analysis/exp4_vector_geometry/{model_name}/introspection_direction_mean_diff.pt")
+    """Load the mean-diff direction from 04b_vector_geometry."""
+    path = Path(f"analysis/04b_vector_geometry/{model_name}/introspection_direction_mean_diff.pt")
     if not path.exists():
         raise FileNotFoundError(f"Mean-diff direction not found at {path}")
 
@@ -803,7 +805,7 @@ def main():
     parser.add_argument("--no-judge", action="store_true", help="Disable LLM judge evaluation")
     parser.add_argument("--categories", type=str, nargs="+", default=None,
                         help="Specific categories to test (default: all)")
-    parser.add_argument("--output-dir", type=str, default="analysis/exp40_mean_diff_steering",
+    parser.add_argument("--output-dir", type=str, default="analysis/04e_mean_diff_steering",
                         help="Output directory")
     parser.add_argument("--plots-only", action="store_true", help="Only regenerate plots from existing results")
     args = parser.parse_args()

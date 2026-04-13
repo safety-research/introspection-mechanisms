@@ -31,6 +31,7 @@ Thumbs.db
 wandb/
 .cache/
 cache/
+plotting/output/
 
 # Large analysis outputs (regenerate by running experiment scripts)
-analysis/
+analysis*

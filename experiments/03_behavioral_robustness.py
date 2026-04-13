@@ -110,7 +110,7 @@ DEFAULT_LAYER_SWEEP = [0.4, 0.5, 0.6, 0.7, 0.8]
 DEFAULT_STRENGTH_SWEEP = [1.0, 2.0, 4.0, 8.0]
 DEFAULT_N_BASELINE = 100
 
-# Trial structure (matching exp21):
+# Trial structure (matching experiment 02 (steering evaluation)):
 # - Trial numbers 1-10 appear in the prompt ("Trial X: ...")
 # - Injection: 10 trial numbers × 10 samples per trial = 100 per concept
 # - Control: 10 trial numbers × 1 sample per trial = 10 per concept (total 500 for 50 concepts)
@@ -121,9 +121,9 @@ DEFAULT_CONTROL_SAMPLES_PER_TRIAL = 1  # Samples per trial number for control (p
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_BATCH_SIZE = 32
-DEFAULT_OUTPUT_DIR = "analysis/exp55_staged_introspection"
+DEFAULT_OUTPUT_DIR = "analysis/03_behavioral_robustness"
 
-# Introspection prompt (EXACT same as exp1/exp21)
+# Introspection prompt (EXACT same as experiment 01 (concept injection)/experiment 02 (steering evaluation))
 INTROSPECTION_EXPLANATION = (
     "I am an interpretability researcher studying transformer-based language models like you. "
     "I have access to the internals of your neural network. I have identified patterns in your "
@@ -210,7 +210,7 @@ def save_results_incremental(results_file: Path, results: List[Dict]):
 def build_base_model_prompt(trial_number: int) -> str:
     """
     Build prompt for base model (no chat template).
-    Uses the EXACT same prompt structure as exp38.
+    Uses the EXACT same prompt structure as experiment 03d (abliteration).
     """
     formatted_prompt = (
         f"User: {INTROSPECTION_EXPLANATION}\n\n"
@@ -225,7 +225,7 @@ def build_base_model_prompt(trial_number: int) -> str:
 def build_instruct_model_prompt(model: ModelWrapper, trial_number: int) -> str:
     """
     Build prompt for instruct model (with chat template).
-    Uses the EXACT same message format as exp1/exp21.
+    Uses the EXACT same message format as experiment 01 (concept injection)/experiment 02 (steering evaluation).
     """
     messages = [
         {"role": "system", "content": ""},
@@ -395,7 +395,7 @@ def check_claims_detection(response: str) -> bool:
 def compute_metrics_from_results(results: List[Dict]) -> Dict:
     """
     Compute detection and identification metrics from a list of results.
-    Uses LLM judge evaluations (like exp21), NOT heuristics.
+    Uses LLM judge evaluations (like experiment 02 (steering evaluation)), NOT heuristics.
 
     Metrics:
     - detection_rate: P(claims_detection | injection) from LLM judge
@@ -814,7 +814,7 @@ def run_single_trial(
     Run a single introspection trial.
 
     IMPORTANT: Tokenization differs between base and instruct models:
-    - Base models: Use encode() which adds BOS token (matching exp38)
+    - Base models: Use encode() which adds BOS token (matching experiment 03d (abliteration))
     - Instruct models: Use add_special_tokens=False since chat template adds BOS
     """
     # Build prompt
@@ -825,7 +825,7 @@ def run_single_trial(
 
     # Tokenize - DIFFERENT for base vs instruct!
     if is_base_model:
-        # Base model: use encode() which adds BOS token (matching exp38)
+        # Base model: use encode() which adds BOS token (matching experiment 03d (abliteration))
         input_ids = model.tokenizer.encode(prompt, return_tensors="pt").to(model.model.device)
     else:
         # Instruct model: chat template already includes BOS, so add_special_tokens=False
@@ -874,11 +874,11 @@ def run_single_trial(
     else:
         response = full_response
 
-    # Return result dict matching exp21 structure
+    # Return result dict matching experiment 02 (steering evaluation) structure
     # NOTE: concept is None for control trials (no injection)
     # NOTE: evaluations will be added by LLM judge later via batch_evaluate()
     return {
-        "concept": concept_word if is_injection else None,  # None for control trials (like exp21)
+        "concept": concept_word if is_injection else None,  # None for control trials (like experiment 02 (steering evaluation))
         "trial": trial_number,
         "response": response,
         "full_response": full_response if is_base_model else None,  # Keep original for debugging
@@ -907,7 +907,7 @@ def run_concept_trials(
     """
     Run all trials for a single concept at a specific config.
 
-    Trial structure (matching exp21):
+    Trial structure (matching experiment 02 (steering evaluation)):
     - Injection: max_trial_number trial numbers × samples_per_trial samples
     - Control: max_trial_number trial numbers × control_samples_per_trial samples
 
@@ -1053,7 +1053,7 @@ def run_experiment(
     # Track completed configs for this run
     new_completed_configs = list(checkpoint.get('completed_configs', [])) if checkpoint else []
 
-    # Initialize LLM judge for incremental evaluation (like exp21)
+    # Initialize LLM judge for incremental evaluation (like experiment 02 (steering evaluation))
     judge = None
     if use_llm_judge:
         try:
@@ -1150,7 +1150,7 @@ def run_experiment(
                     temperature=temperature,
                 )
 
-                # Run LLM judge on this concept's results (like exp21)
+                # Run LLM judge on this concept's results (like experiment 02 (steering evaluation))
                 if judge is not None:
                     # Build prompts for judge
                     original_prompts = []
@@ -1384,7 +1384,7 @@ def parse_args():
         default=DEFAULT_N_BASELINE,
         help="Number of baseline words for vector extraction"
     )
-    # Trial structure arguments (matching exp21)
+    # Trial structure arguments (matching experiment 02 (steering evaluation))
     parser.add_argument(
         "-mtn", "--max-trial-number",
         type=int,
@@ -1505,7 +1505,7 @@ def main():
 
     # Save experiment config
     config = {
-        "experiment": "exp55_staged_introspection",
+        "experiment": "03_behavioral_robustness",
         "timestamp": datetime.now().isoformat(),
         "models": models,
         "concepts": args.concepts,

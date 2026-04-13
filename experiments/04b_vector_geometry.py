@@ -9,7 +9,7 @@ Analyses used in the paper:
   - Section 4.3: PCA of 500 L2-normalized concept vectors
 
 Usage:
-    python 04b_vector_geometry.py --exp1-dir analysis/exp21_more_concepts_steering
+    python 04b_vector_geometry.py --injection-dir analysis/02b_steering_500_concepts
 """
 
 import sys
@@ -62,16 +62,16 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument(
     "-i",
-    "--exp1-dir",
+    "--injection-dir",
     type=str,
-    default="analysis/exp21_more_concepts_steering",
-    help="Path to Experiment 1 results directory",
+    default="analysis/02b_steering_500_concepts",
+    help="Path to Concept Injection results directory",
 )
 parser.add_argument(
     "-o",
     "--output-dir",
     type=str,
-    default="analysis/exp4_vector_geometry",
+    default="analysis/04b_vector_geometry",
     help="Output directory",
 )
 parser.add_argument(
@@ -356,10 +356,10 @@ def get_available_layers(vectors_dir: Path) -> List[int]:
     return sorted(layers)
 
 
-def discover_configs(exp1_model_dir: Path) -> List[Tuple[int, float]]:
-    """Discover layer/strength configurations from exp1 results."""
+def discover_configs(injection_model_dir: Path) -> List[Tuple[int, float]]:
+    """Discover layer/strength configurations from experiment 01 (concept injection) results."""
     configs = []
-    for d in exp1_model_dir.glob("layer_*_strength_*"):
+    for d in injection_model_dir.glob("layer_*_strength_*"):
         if not d.is_dir():
             continue
         try:
@@ -377,19 +377,19 @@ def discover_configs(exp1_model_dir: Path) -> List[Tuple[int, float]]:
 # ---------------------------------------------------------------------------
 
 
-def load_exp1_results(
-    exp1_dir: Path, config_dir: Optional[Path] = None
+def load_injection_results(
+    injection_dir: Path, config_dir: Optional[Path] = None
 ) -> Dict[str, Dict]:
-    """Load Experiment 1 results and compute per-concept detection metrics."""
+    """Load Concept Injection results and compute per-concept detection metrics."""
     concept_metrics: Dict[str, Dict] = {}
 
     if config_dir is not None:
         config_dirs = [config_dir] if config_dir.exists() else []
     else:
-        config_dirs = list(exp1_dir.glob("layer_*_strength_*"))
+        config_dirs = list(injection_dir.glob("layer_*_strength_*"))
 
     if not config_dirs:
-        print(f"No Experiment 1 results found in {exp1_dir}")
+        print(f"No Concept Injection results found in {injection_dir}")
         return {}
 
     for cdir in config_dirs:
@@ -457,15 +457,15 @@ def load_exp1_results(
 
 
 def aggregate_concept_metrics_across_configs(
-    exp1_model_dir: Path, configs: List[Tuple[int, float]]
+    injection_model_dir: Path, configs: List[Tuple[int, float]]
 ) -> Dict[str, Dict]:
     """Aggregate concept metrics across configs using max detection rate."""
     all_metrics: Dict[str, Dict] = {}
     for layer_idx, strength in configs:
-        config_dir = exp1_model_dir / get_config_dir_name(layer_idx, strength)
+        config_dir = injection_model_dir / get_config_dir_name(layer_idx, strength)
         if not config_dir.exists():
             continue
-        metrics = load_exp1_results(exp1_model_dir, config_dir=config_dir)
+        metrics = load_injection_results(injection_model_dir, config_dir=config_dir)
         for concept, m in metrics.items():
             if concept not in all_metrics:
                 all_metrics[concept] = {
@@ -1353,7 +1353,7 @@ def create_lda_visualization(
 
 
 def analyze_layer_wise(
-    exp1_model_dir: Path,
+    injection_model_dir: Path,
     vectors_dir: Path,
     combined_df: pd.DataFrame,
     concept_metrics: Dict[str, Dict],
@@ -1445,7 +1445,7 @@ def analyze_layer_wise(
 
 
 def analyze_model(
-    exp1_model_dir: Path,
+    injection_model_dir: Path,
     output_dir: Path,
     model_name: str,
     split_metric: str = "adaptive",
@@ -1458,7 +1458,7 @@ def analyze_model(
     if layer_index is not None and strength is not None:
         config_name = get_config_dir_name(layer_index, strength)
         model_out = output_dir / model_name / config_name
-        config_dir = exp1_model_dir / config_name
+        config_dir = injection_model_dir / config_name
     else:
         model_out = output_dir / model_name
         config_dir = None
@@ -1471,9 +1471,9 @@ def analyze_model(
         print(f"  Config: layer={layer_index}, strength={strength}")
     print("=" * 80)
 
-    # 1. Load exp1 results
+    # 1. Load experiment 01 (concept injection) results
     print("\n[1/6] Loading detection metrics...")
-    concept_metrics = load_exp1_results(exp1_model_dir, config_dir=config_dir)
+    concept_metrics = load_injection_results(injection_model_dir, config_dir=config_dir)
     if not concept_metrics:
         print("Error: No results found.")
         return False
@@ -1481,7 +1481,7 @@ def analyze_model(
 
     # 2. Load concept vectors
     print("\n[2/6] Loading concept vectors...")
-    vectors_dir = exp1_model_dir / "vectors"
+    vectors_dir = injection_model_dir / "vectors"
     if not vectors_dir.exists():
         print(f"Error: Vectors directory not found: {vectors_dir}")
         return False
@@ -1611,7 +1611,7 @@ def analyze_model(
     if layer_index is None:
         print("\n  Layer-wise analysis...")
         analyze_layer_wise(
-            exp1_model_dir,
+            injection_model_dir,
             vectors_dir,
             combined_df,
             concept_metrics,
@@ -1671,7 +1671,7 @@ def analyze_model(
 
 
 def main():
-    exp1_base = Path(args.exp1_dir)
+    injection_base = Path(args.injection_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1679,19 +1679,19 @@ def main():
     print("EXPERIMENT 4b: CONCEPT VECTOR GEOMETRY ANALYSIS")
     print("=" * 80)
 
-    if not exp1_base.exists():
-        print(f"Error: {exp1_base} not found")
+    if not injection_base.exists():
+        print(f"Error: {injection_base} not found")
         return
 
     # Find model directories
     model_dirs = []
-    for item in exp1_base.iterdir():
+    for item in injection_base.iterdir():
         if item.is_dir() and item.name != "shared":
             if any(item.glob("layer_*_strength_*")) or (item / "vectors").exists():
                 model_dirs.append(item)
 
     if not model_dirs:
-        print(f"No model directories found in {exp1_base}")
+        print(f"No model directories found in {injection_base}")
         return
 
     if args.model:

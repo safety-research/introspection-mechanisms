@@ -9,14 +9,14 @@ If only the assistant persona can detect injections, this suggests:
 2. It's specifically tied to the assistant role
 
 Variants:
-1. STANDARD_ASSISTANT (control): Normal user/assistant chat format - exactly like Exp21
+1. STANDARD_ASSISTANT (control): Normal user/assistant chat format - exactly like Experiment 02 (steering evaluation)
 2. STANDARD_ASSISTANT_RAW: Same content but WITHOUT chat template (sanity check)
 3. SIMULATED_USER: Have the "user" role detect injections instead of assistant
 4. CHARACTER_DIALOGUE: Alice/Bob style dialogue without user/assistant formatting
 5. NO_CHAT_FORMAT: Raw text completion without any chat template
 
 Uses:
-- Same 50 concepts as Exp21
+- Same 50 concepts as Experiment 02 (steering evaluation)
 - Same steering setup (layer 38 by default)
 - Same evaluation methodology (LLM judge)
 
@@ -53,8 +53,8 @@ Output Files:
     ├── plots/
     │   ├── detection_rates_comparison.png
     │   ├── detection_rates_progress.png  # Updated during run
-    │   ├── exp21_baseline_comparison.png
-    │   └── exp21_baseline_simple.png
+    │   ├── steering_baseline_comparison.png
+    │   └── steering_baseline_simple.png
     └── {variant}/
         ├── checkpoint.json            # Tracks completed concepts (deleted on completion)
         ├── partial_results.json       # Incremental results during run (deleted on completion)
@@ -63,8 +63,10 @@ Output Files:
 """
 
 import argparse
+import sys
 import torch
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import json
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
@@ -92,7 +94,7 @@ import time
 from datetime import datetime
 import shutil
 
-# Default test concepts (same 50 words from exp21/paper)
+# Default test concepts (same 50 words from experiment 02 (steering evaluation)/paper)
 DEFAULT_TEST_CONCEPTS = [
     "Dust", "Satellites", "Trumpets", "Origami", "Illusions",
     "Cameras", "Lightning", "Constellations", "Treasures", "Phones",
@@ -108,7 +110,7 @@ DEFAULT_TEST_CONCEPTS = [
 
 # Persona variants
 PERSONA_VARIANTS = [
-    "standard_assistant",      # Control: normal user/assistant format (exactly like exp21)
+    "standard_assistant",      # Control: normal user/assistant format (exactly like experiment 02 (steering evaluation))
     "standard_assistant_raw",  # Sanity check: same content but without chat template
     "simulated_user",          # User role detects injections instead of assistant
     "character_dialogue",      # Alice/Bob style dialogue
@@ -123,7 +125,7 @@ DEFAULT_N_CONTROL_CONCEPTS = 10  # Control trials don't inject concepts, so fewe
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_BATCH_SIZE = 256
-DEFAULT_OUTPUT_DIR = "analysis/exp44_persona_introspection"
+DEFAULT_OUTPUT_DIR = "analysis/03b_persona_variants"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_MODEL = "gemma3_27b"
@@ -202,7 +204,7 @@ def compute_standard_error(p: float, n: int) -> float:
 def create_progress_plot(
     results_by_variant: Dict[str, Dict],
     output_dir: Path,
-    exp21_baseline: Optional[Dict] = None,  # Kept for API compatibility but not used
+    steering_baseline: Optional[Dict] = None,  # Kept for API compatibility but not used
     suffix: str = "_progress",
 ):
     """
@@ -302,7 +304,7 @@ def create_progress_plot(
             combined_ses.append(0)
             n_completed.append(0)
 
-    # Create plot with 3 bars and error bars (matching exp35 style)
+    # Create plot with 3 bars and error bars (matching experiment 03c (prompt variants) style)
     # Order: FPR (red), TPR (blue), Introspection (green)
     metric_names = [
         'False positive rate',
@@ -350,7 +352,7 @@ def create_progress_plot(
 
 def create_standard_assistant_prompt(trial_number: int) -> Tuple[str, List[Dict]]:
     """
-    Create standard assistant prompt (exactly like exp21).
+    Create standard assistant prompt (exactly like experiment 02 (steering evaluation)).
 
     Returns:
         Tuple of (trial_text_marker, messages)
@@ -1119,7 +1121,7 @@ def create_comparison_plots(
     }
 
     # =========================================================================
-    # MAIN PLOT: Key Metrics Comparison (matching exp35 style)
+    # MAIN PLOT: Key Metrics Comparison (matching experiment 03c (prompt variants) style)
     # 3 grouped bars per variant: FPR (red), TPR (blue), Introspection (green)
     # Order: FPR first (leftmost), then TPR, then Introspection
     # =========================================================================
@@ -1266,64 +1268,64 @@ def create_comparison_plots(
     print(f"  Saved comparison plots to {plots_dir}")
 
 
-def load_exp21_baseline(
-    exp21_dir: Path,
+def load_steering_baseline(
+    steering_dir: Path,
     model_name: str,
     layer_idx: int,
     strength: float,
 ) -> Optional[Dict]:
     """
-    Load baseline results from Exp21.
+    Load baseline results from Experiment 02 (steering evaluation).
 
     Args:
-        exp21_dir: Path to exp21 output directory
+        steering_dir: Path to experiment 02 (steering evaluation) output directory
         model_name: Model name
         layer_idx: Layer index used for steering
         strength: Steering strength
 
     Returns:
-        Dict with exp21 metrics or None if not found
+        Dict with experiment 02 (steering evaluation) metrics or None if not found
     """
     # Try to find matching results file
-    exp21_model_dir = exp21_dir / model_name
+    steering_model_dir = steering_dir / model_name
 
-    if not exp21_model_dir.exists():
-        print(f"  Warning: Exp21 model directory not found: {exp21_model_dir}")
+    if not steering_model_dir.exists():
+        print(f"  Warning: Experiment 02 (steering evaluation) model directory not found: {steering_model_dir}")
         return None
 
-    # Use layer index directly (exp21_more_concepts_steering format)
-    results_dir = exp21_model_dir / f"layer_{layer_idx}_strength_{strength}"
+    # Use layer index directly (02b_steering_500_concepts format)
+    results_dir = steering_model_dir / f"layer_{layer_idx}_strength_{strength}"
     results_file = results_dir / "results.json"
 
     if results_file.exists():
-        print(f"  Found Exp21 baseline: {results_file}")
+        print(f"  Found Experiment 02 (steering evaluation) baseline: {results_file}")
         try:
             with open(results_file, 'r') as f:
                 data = json.load(f)
             return data.get("metrics", {})
         except Exception as e:
-            print(f"  Warning: Could not load Exp21 baseline: {e}")
+            print(f"  Warning: Could not load Experiment 02 (steering evaluation) baseline: {e}")
             return None
 
-    print(f"  Warning: No Exp21 baseline found for layer {layer_idx}, strength {strength}")
+    print(f"  Warning: No Experiment 02 (steering evaluation) baseline found for layer {layer_idx}, strength {strength}")
     print(f"  Looked for: {results_file}")
     return None
 
 
 def create_baseline_comparison_plot(
     results_by_variant: Dict[str, Dict],
-    exp21_baseline: Optional[Dict],
+    steering_baseline: Optional[Dict],
     output_dir: Path,
 ):
     """
-    Create comparison plot showing Exp21 baseline vs persona variants.
+    Create comparison plot showing Experiment 02 (steering evaluation) baseline vs persona variants.
 
     This is the key plot showing whether non-assistant personas perform
-    similarly to the original Exp21 assistant-based experiment.
+    similarly to the original Experiment 02 (steering evaluation) assistant-based experiment.
 
     Args:
         results_by_variant: Dict of variant -> results
-        exp21_baseline: Dict with exp21 metrics (or None)
+        steering_baseline: Dict with experiment 02 (steering evaluation) metrics (or None)
         output_dir: Output directory for plots
     """
     plots_dir = output_dir / "plots"
@@ -1332,30 +1334,30 @@ def create_baseline_comparison_plot(
     variants = list(results_by_variant.keys())
 
     # Prepare data for plotting
-    # Labels: Exp21 Baseline + all variants
-    all_labels = ["Exp21\nBaseline"] + [v.replace('_', '\n') for v in variants]
+    # Labels: Experiment 02 (steering evaluation) Baseline + all variants
+    all_labels = ["Experiment 02 (steering evaluation)\nBaseline"] + [v.replace('_', '\n') for v in variants]
 
-    # Get exp21 baseline metrics
-    if exp21_baseline:
-        exp21_detection = exp21_baseline.get("detection_hit_rate", 0)
-        exp21_fp = exp21_baseline.get("detection_false_alarm_rate", 0)
-        exp21_llm_detection = exp21_baseline.get("detection_hit_rate", 0)  # Same as detection_hit_rate
-        exp21_identification = exp21_baseline.get("identification_accuracy_given_claim", 0)
+    # Get experiment 02 (steering evaluation) baseline metrics
+    if steering_baseline:
+        steering_detection = steering_baseline.get("detection_hit_rate", 0)
+        steering_fp = steering_baseline.get("detection_false_alarm_rate", 0)
+        steering_llm_detection = steering_baseline.get("detection_hit_rate", 0)  # Same as detection_hit_rate
+        steering_identification = steering_baseline.get("identification_accuracy_given_claim", 0)
     else:
-        exp21_detection = 0
-        exp21_fp = 0
-        exp21_llm_detection = 0
-        exp21_identification = 0
+        steering_detection = 0
+        steering_fp = 0
+        steering_llm_detection = 0
+        steering_identification = 0
 
     # Get variant metrics (using LLM judge metrics)
     variant_detection_rates = [results_by_variant[v]["metrics"].get("detection_hit_rate", 0) or 0 for v in variants]
     variant_fp_rates = [results_by_variant[v]["metrics"].get("detection_false_alarm_rate", 0) or 0 for v in variants]
     variant_id_rates = [results_by_variant[v]["metrics"].get("identification_accuracy_given_claim", 0) or 0 for v in variants]
 
-    # Combine exp21 + variants
-    all_detection_rates = [exp21_detection or 0] + variant_detection_rates
-    all_fp_rates = [exp21_fp or 0] + variant_fp_rates
-    all_id_rates = [exp21_identification or 0] + variant_id_rates
+    # Combine experiment 02 (steering evaluation) + variants
+    all_detection_rates = [steering_detection or 0] + variant_detection_rates
+    all_fp_rates = [steering_fp or 0] + variant_fp_rates
+    all_id_rates = [steering_identification or 0] + variant_id_rates
 
     # Create figure
     fig, ax1 = plt.subplots(figsize=(14, 6))
@@ -1372,14 +1374,14 @@ def create_baseline_comparison_plot(
     bars3 = ax1.bar(x + width, all_fp_rates, width, label='False positive rate',
                    color='lightcoral', edgecolor='black', linewidth=0.5)
 
-    # Add hatching to exp21 baseline bars
+    # Add hatching to experiment 02 (steering evaluation) baseline bars
     bars1[0].set_hatch('///')
     bars2[0].set_hatch('///')
     bars3[0].set_hatch('///')
 
     ax1.set_xlabel('Condition', fontsize=11)
     ax1.set_ylabel('Rate', fontsize=11)
-    ax1.set_title('Exp21 Baseline vs Non-Assistant Personas (LLM Judge Metrics)', fontsize=12, fontweight='bold')
+    ax1.set_title('Experiment 02 (steering evaluation) Baseline vs Non-Assistant Personas (LLM Judge Metrics)', fontsize=12, fontweight='bold')
     ax1.set_xticks(x)
     ax1.set_xticklabels(all_labels, fontsize=9)
     ax1.legend(loc='upper right')
@@ -1402,7 +1404,7 @@ def create_baseline_comparison_plot(
     ax1.annotate('Baseline', xy=(0, -0.05), fontsize=9, ha='center', style='italic', color='gray')
 
     plt.tight_layout()
-    plt.savefig(plots_dir / "exp21_baseline_comparison.png", dpi=150, bbox_inches='tight')
+    plt.savefig(plots_dir / "steering_baseline_comparison.png", dpi=150, bbox_inches='tight')
     plt.close()
 
     # Also create a simplified single-metric comparison plot
@@ -1427,19 +1429,19 @@ def create_baseline_comparison_plot(
                    xytext=(0, 5), textcoords="offset points",
                    ha='center', va='bottom', fontsize=10, fontweight='bold')
 
-    # Add horizontal line at exp21 baseline
-    ax.axhline(y=exp21_detection, color='red', linestyle='--', alpha=0.7, linewidth=2)
-    ax.annotate(f'Exp21 Baseline: {exp21_detection:.1%}',
-               xy=(len(all_labels) - 0.5, exp21_detection + 0.02),
+    # Add horizontal line at experiment 02 (steering evaluation) baseline
+    ax.axhline(y=steering_detection, color='red', linestyle='--', alpha=0.7, linewidth=2)
+    ax.annotate(f'Experiment 02 (steering evaluation) Baseline: {steering_detection:.1%}',
+               xy=(len(all_labels) - 0.5, steering_detection + 0.02),
                fontsize=9, color='red', ha='right')
 
     ax.axvline(x=0.5, color='gray', linestyle='--', alpha=0.5)
 
     plt.tight_layout()
-    plt.savefig(plots_dir / "exp21_baseline_simple.png", dpi=150, bbox_inches='tight')
+    plt.savefig(plots_dir / "steering_baseline_simple.png", dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved Exp21 baseline comparison plots to {plots_dir}")
+    print(f"  Saved Experiment 02 (steering evaluation) baseline comparison plots to {plots_dir}")
 
 
 def create_summary_report(
@@ -1454,7 +1456,7 @@ def create_summary_report(
         output_dir: Output directory
     """
     summary = {
-        "experiment": "exp44_persona_introspection",
+        "experiment": "03b_persona_variants",
         "question": "Is introspection capability assistant-specific?",
         "variants_tested": list(results_by_variant.keys()),
         "findings": {},
@@ -1657,27 +1659,27 @@ def parse_args():
         help="Only regenerate plots from existing results (skips model loading)"
     )
     parser.add_argument(
-        "--use-exp21-vectors",
+        "--use-experiment 02 (steering evaluation)-vectors",
         action="store_true",
         default=True,
-        help="Load concept vectors from exp21 instead of extracting new ones"
+        help="Load concept vectors from experiment 02 (steering evaluation) instead of extracting new ones"
     )
     parser.add_argument(
-        "--exp21-dir",
+        "--steering-dir",
         type=str,
-        default="analysis/exp21_more_concepts_steering",
-        help="Path to exp21 results for loading vectors"
+        default="analysis/02b_steering_500_concepts",
+        help="Path to experiment 02 (steering evaluation) results for loading vectors"
     )
     parser.add_argument(
-        "--chat-template-from-exp35",
+        "--chat-template-from-experiment 03c (prompt variants)",
         action="store_true",
-        help="Use exp35 results for 'Chat template' (standard_assistant) variant"
+        help="Use experiment 03c (prompt variants) results for 'Chat template' (standard_assistant) variant"
     )
     parser.add_argument(
-        "--exp35-results",
+        "--prompt-variant-results",
         type=str,
-        default="analysis/exp35_causal_bypass_controls/gemma3_27b/original/results.json",
-        help="Path to exp35 results for Chat template variant (used with --chat-template-from-exp35)"
+        default="analysis/03c_prompt_variants/gemma3_27b/original/results.json",
+        help="Path to experiment 03c (prompt variants) results for Chat template variant (used with --chat-template-from-experiment 03c (prompt variants))"
     )
 
     return parser.parse_args()
@@ -1717,23 +1719,23 @@ def main():
                 with open(results_file, 'r') as f:
                     results_by_variant[variant] = json.load(f)
 
-        # Optionally load standard_assistant from exp35
-        if args.chat_template_from_exp35:
-            exp35_path = Path(args.exp35_results)
-            if exp35_path.exists():
-                print(f"  Loading Chat template (standard_assistant) from exp35: {exp35_path}")
-                with open(exp35_path, 'r') as f:
-                    exp35_data = json.load(f)
+        # Optionally load standard_assistant from experiment 03c (prompt variants)
+        if args.chat_template_from_prompt_variants:
+            prompt_variant_path = Path(args.prompt_variant_results)
+            if prompt_variant_path.exists():
+                print(f"  Loading Chat template (standard_assistant) from experiment 03c (prompt variants): {prompt_variant_path}")
+                with open(prompt_variant_path, 'r') as f:
+                    prompt_variant_data = json.load(f)
 
-                # exp35 results.json is a list of results, need to convert to exp44 format
-                if isinstance(exp35_data, list):
-                    exp35_results = exp35_data
+                # experiment 03c (prompt variants) results.json is a list of results, need to convert to exp44 format
+                if isinstance(prompt_variant_data, list):
+                    prompt_variant_results = prompt_variant_data
                 else:
-                    exp35_results = exp35_data.get("results", [])
+                    prompt_variant_results = prompt_variant_data.get("results", [])
 
-                # Compute metrics from exp35 results (same logic as compute_detection_and_identification_metrics)
-                injection_results = [r for r in exp35_results if r.get("trial_type") == "injection"]
-                control_results = [r for r in exp35_results if r.get("trial_type") == "control"]
+                # Compute metrics from experiment 03c (prompt variants) results (same logic as compute_detection_and_identification_metrics)
+                injection_results = [r for r in prompt_variant_results if r.get("trial_type") == "injection"]
+                control_results = [r for r in prompt_variant_results if r.get("trial_type") == "control"]
 
                 def get_detection(r):
                     return r.get('evaluations', {}).get('claims_detection', {}).get('claims_detection', False)
@@ -1753,24 +1755,24 @@ def main():
                 combined = sum(1 for r in injection_results if get_detection(r) and get_identification(r))
                 combined_rate = combined / n_inj if n_inj > 0 else 0
 
-                exp35_metrics = {
+                prompt_variant_metrics = {
                     "detection_hit_rate": detection_hit_rate,
                     "detection_false_alarm_rate": false_alarm_rate,
                     "combined_detection_and_identification_rate": combined_rate,
                 }
 
                 results_by_variant["standard_assistant"] = {
-                    "results": exp35_results,
-                    "metrics": exp35_metrics,
+                    "results": prompt_variant_results,
+                    "metrics": prompt_variant_metrics,
                 }
                 print(f"    Loaded {n_inj} injection, {n_ctrl} control trials; TPR={detection_hit_rate:.1%}, FPR={false_alarm_rate:.1%}")
             else:
-                print(f"  Warning: exp35 results not found: {exp35_path}")
+                print(f"  Warning: experiment 03c (prompt variants) results not found: {prompt_variant_path}")
 
         if results_by_variant:
             create_comparison_plots(results_by_variant, output_dir, model_name=args.model)
 
-            # Load exp21 baseline for comparison plot
+            # Load experiment 02 (steering evaluation) baseline for comparison plot
             # Need to get n_layers from config or estimate
             config_file = output_dir / "config.json"
             if config_file.exists():
@@ -1780,13 +1782,13 @@ def main():
             else:
                 layer_idx = args.layer
 
-            exp21_baseline = load_exp21_baseline(
-                exp21_dir=Path(args.exp21_dir),
+            steering_baseline = load_steering_baseline(
+                steering_dir=Path(args.steering_dir),
                 model_name=args.model,
                 layer_idx=layer_idx,
                 strength=args.strength,
             )
-            create_baseline_comparison_plot(results_by_variant, exp21_baseline, output_dir)
+            create_baseline_comparison_plot(results_by_variant, steering_baseline, output_dir)
             create_summary_report(results_by_variant, output_dir)
         else:
             print("No existing results found!")
@@ -1818,27 +1820,27 @@ def main():
     # Load or extract concept vectors
     concept_vectors = {}
 
-    if args.use_exp21_vectors:
-        print(f"\nLoading concept vectors from {args.exp21_dir}...")
-        # Vectors are stored per layer index in exp21_more_concepts_steering
-        exp21_base_dir = Path(args.exp21_dir) / args.model / "vectors"
-        exp21_vector_dir = exp21_base_dir / f"layer_{args.layer}"
+    if args.use_steering_vectors:
+        print(f"\nLoading concept vectors from {args.steering_dir}...")
+        # Vectors are stored per layer index in 02b_steering_500_concepts
+        steering_base_dir = Path(args.steering_dir) / args.model / "vectors"
+        steering_vector_dir = steering_base_dir / f"layer_{args.layer}"
 
-        if exp21_vector_dir.exists():
-            print(f"  Found vector directory: {exp21_vector_dir}")
+        if steering_vector_dir.exists():
+            print(f"  Found vector directory: {steering_vector_dir}")
             for concept in args.concepts:
-                vector_path = exp21_vector_dir / f"{concept}.pt"
+                vector_path = steering_vector_dir / f"{concept}.pt"
                 if vector_path.exists():
                     concept_vectors[concept] = torch.load(vector_path, map_location=args.device)
                 else:
                     print(f"  Warning: No vector found for {concept}")
             print(f"  Loaded {len(concept_vectors)} concept vectors")
         else:
-            print(f"  Warning: exp21 vector directory not found: {exp21_vector_dir}")
-            print(f"  Available layer directories: {list(exp21_base_dir.iterdir()) if exp21_base_dir.exists() else 'None'}")
+            print(f"  Warning: experiment 02 (steering evaluation) vector directory not found: {steering_vector_dir}")
+            print(f"  Available layer directories: {list(steering_base_dir.iterdir()) if steering_base_dir.exists() else 'None'}")
             print(f"  Will extract new vectors")
 
-    # Extract vectors if not loaded from exp21
+    # Extract vectors if not loaded from experiment 02 (steering evaluation)
     if not concept_vectors:
         print(f"\nExtracting concept vectors at layer {args.layer}...")
         baseline_words = get_baseline_words(n=args.n_baseline)
@@ -1857,10 +1859,10 @@ def main():
             torch.save(vec, vector_dir / f"{concept}.pt")
         print(f"  Extracted and saved {len(concept_vectors)} concept vectors")
 
-    # Pre-load exp21 baseline for progress plotting
-    print("\nLoading Exp21 baseline for comparison...")
-    exp21_baseline = load_exp21_baseline(
-        exp21_dir=Path(args.exp21_dir),
+    # Pre-load experiment 02 (steering evaluation) baseline for progress plotting
+    print("\nLoading Experiment 02 (steering evaluation) baseline for comparison...")
+    steering_baseline = load_steering_baseline(
+        steering_dir=Path(args.steering_dir),
         model_name=args.model,
         layer_idx=args.layer,
         strength=args.strength,
@@ -1904,7 +1906,7 @@ def main():
                         pass  # Skip if can't load
 
         try:
-            create_progress_plot(partial_results, output_dir, exp21_baseline, suffix="_progress")
+            create_progress_plot(partial_results, output_dir, steering_baseline, suffix="_progress")
             print(f"  [Progress plot updated at {datetime.now().strftime('%H:%M:%S')}]")
         except Exception as e:
             print(f"  [Warning: Could not update progress plot: {e}]")
@@ -1934,12 +1936,12 @@ def main():
         results_by_variant[variant] = results
 
         # Update progress plot after each variant completes
-        create_progress_plot(results_by_variant, output_dir, exp21_baseline, suffix="_progress")
+        create_progress_plot(results_by_variant, output_dir, steering_baseline, suffix="_progress")
 
     # Create final comparison plots and summary
     print("\nGenerating final comparison plots and summary...")
     create_comparison_plots(results_by_variant, output_dir, model_name=args.model)
-    create_baseline_comparison_plot(results_by_variant, exp21_baseline, output_dir)
+    create_baseline_comparison_plot(results_by_variant, steering_baseline, output_dir)
     create_summary_report(results_by_variant, output_dir)
 
     print("\n" + "=" * 80)
@@ -1947,7 +1949,7 @@ def main():
     print("=" * 80)
     print(f"Results saved to: {output_dir}")
     print(f"Summary: {output_dir / 'summary.txt'}")
-    print(f"Exp21 Baseline Comparison: {output_dir / 'plots' / 'exp21_baseline_comparison.png'}")
+    print(f"Experiment 02 (steering evaluation) Baseline Comparison: {output_dir / 'plots' / 'steering_baseline_comparison.png'}")
 
 
 if __name__ == "__main__":

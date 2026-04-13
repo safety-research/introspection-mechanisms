@@ -229,7 +229,7 @@ DEFAULT_TRAIN_BATCH_SIZE = 1
 DEFAULT_GRADIENT_ACCUMULATION = 8
 DEFAULT_MAX_SEQ_LEN = 2048
 
-# Evaluation defaults — matched to exp21's best config for gemma3-27b
+# Evaluation defaults — matched to experiment 02 (steering evaluation)'s best config for gemma3-27b
 # Layer 35 (fraction 0.565), strength 4.0, temp 1.0 gives ~45% hit rate
 DEFAULT_LAYER_FRACTION = 0.565
 DEFAULT_STRENGTH = 4.0
@@ -237,7 +237,7 @@ DEFAULT_N_CONTROL = 50
 DEFAULT_EVAL_TEMPERATURE = 1.0
 DEFAULT_EVAL_MAX_TOKENS = 100
 
-# Standard test concepts from exp21 (50 words)
+# Standard test concepts from experiment 02 (steering evaluation) (50 words)
 DEFAULT_TEST_CONCEPTS = [
     "Dust", "Satellites", "Trumpets", "Origami", "Illusions",
     "Cameras", "Lightning", "Constellations", "Treasures", "Phones",
@@ -251,7 +251,7 @@ DEFAULT_TEST_CONCEPTS = [
     "Denim", "Monoliths", "Milk", "Bread", "Silver",
 ]
 
-DEFAULT_OUTPUT_DIR = "analysis/exp61_proxy_task_sweep"
+DEFAULT_OUTPUT_DIR = "analysis/15_proxy_task_sweep"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 
@@ -2008,7 +2008,7 @@ def evaluate_task(
 ) -> Dict:
     """
     Evaluate a single task's adapter on steering vector detection
-    using the STANDARD introspection methodology (same as exp21).
+    using the STANDARD introspection methodology (same as experiment 02 (steering evaluation)).
     Returns metrics dict.
     """
     task_dir = eval_dir / task_name
@@ -2016,7 +2016,7 @@ def evaluate_task(
 
     layer_idx = get_layer_at_fraction(model_wrapper, args.layer_fraction)
 
-    # Extract concept vectors using EXACT same methodology as exp21:
+    # Extract concept vectors using EXACT same methodology as experiment 02 (steering evaluation):
     # 50 test concepts, 100 baseline words, "Tell me about {word}" template
     test_concepts = DEFAULT_TEST_CONCEPTS
     baseline_words = get_baseline_words(100)
@@ -2036,7 +2036,7 @@ def evaluate_task(
     words = [w for w in test_concepts if w in concept_vectors]
     print(f"    Extracted {len(concept_vectors)} concept vectors")
 
-    # Run steered trials using STANDARD introspection methodology (same as exp21)
+    # Run steered trials using STANDARD introspection methodology (same as experiment 02 (steering evaluation))
     # This steers from the "Trial" text onwards (during trial question + generation)
     print(f"  Running {len(words)} steered trials...")
     steered_results = []

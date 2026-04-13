@@ -16,7 +16,7 @@ Paper references:
 - Appendix F: Abliterated model details (per-layer refusal direction, projection formula)
 
 This experiment:
-1. Loads best config (steering_layer, strength) from Exp21
+1. Loads best config (steering_layer, strength) from Experiment 02 (steering evaluation)
 2. Extracts per-layer refusal directions from harmful/harmless prompt pairs
 3. Runs baseline trials (concept steering only)
 4. Runs treatment trials (concept steering + refusal ablation)
@@ -32,6 +32,7 @@ Usage:
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import argparse
 import json
@@ -55,7 +56,7 @@ from model_utils import ModelWrapper, load_model, get_layer_at_fraction
 from vector_utils import extract_concept_vectors_batch, get_baseline_words
 from steering_utils import check_concept_mentioned
 from eval_utils import LLMJudge, batch_evaluate, compute_detection_and_identification_metrics
-from exp39_prompts import HARMFUL_PROMPTS, HARMLESS_PROMPTS
+from refusal_prompts import HARMFUL_PROMPTS, HARMLESS_PROMPTS
 
 
 # =============================================================================
@@ -67,8 +68,8 @@ DEFAULT_N_TRIAL_NUMBERS = 10
 DEFAULT_SAMPLES_PER_TRIAL = 3
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_MAX_TOKENS = 100
-DEFAULT_OUTPUT_DIR = "analysis/exp39_remove_refusal_direction"
-DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
+DEFAULT_OUTPUT_DIR = "analysis/03d_refusal_abliteration"
+DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
 
 # Per-layer refusal ablation weight applied at ALL layers with per-layer directions.
 # Direction is extracted per-layer (each layer has its own refusal direction).
@@ -141,7 +142,7 @@ DEFAULT_REGION_BOUNDARIES = {
 # Number of instructions per category for refusal direction extraction
 DEFAULT_N_INSTRUCTIONS = 512
 
-# Full list of 50 test concepts (same as Exp21)
+# Full list of 50 test concepts (same as Experiment 02 (steering evaluation))
 DEFAULT_TEST_CONCEPTS = [
     "Dust", "Satellites", "Trumpets", "Origami", "Illusions",
     "Cameras", "Lightning", "Constellations", "Treasures", "Phones",
@@ -890,26 +891,26 @@ def run_introspection_trials_batched(
 
 
 # =============================================================================
-# Load Best Config and Vectors from Exp21
+# Load Best Config and Vectors from Experiment 02 (steering evaluation)
 # =============================================================================
 
-def load_best_config_from_exp21(
-    exp21_dir: str,
+def load_best_steering_config(
+    steering_dir: str,
     model_name: str,
 ) -> Tuple[int, float, Dict]:
     """
-    Load the best configuration (steering_layer, strength) from Exp21 results.
+    Load the best configuration (steering_layer, strength) from Experiment 02 (steering evaluation) results.
 
     Best config is selected by combined_detection_and_identification_rate.
 
     Returns:
         Tuple of (steering_layer, strength, full_metrics_dict)
     """
-    model_dir = Path(exp21_dir) / model_name
+    model_dir = Path(steering_dir) / model_name
 
     if not model_dir.exists():
         raise FileNotFoundError(
-            f"Exp21 results not found for {model_name} at {model_dir}"
+            f"Experiment 02 (steering evaluation) results not found for {model_name} at {model_dir}"
         )
 
     best_config = None
@@ -947,19 +948,19 @@ def load_best_config_from_exp21(
     return best_config[0], best_config[1], best_metrics
 
 
-def load_concept_vectors_from_exp21(
-    exp21_dir: str,
+def load_concept_vectors_from_steering(
+    steering_dir: str,
     model_name: str,
     steering_layer: int,
     concepts: List[str],
 ) -> Dict[str, torch.Tensor]:
     """
-    Load concept vectors directly from Exp21's saved vectors.
+    Load concept vectors directly from Experiment 02 (steering evaluation)'s saved vectors.
 
     Returns:
         Dictionary mapping concept name -> steering vector tensor
     """
-    vectors_dir = Path(exp21_dir) / model_name / "vectors" / f"layer_{steering_layer}"
+    vectors_dir = Path(steering_dir) / model_name / "vectors" / f"layer_{steering_layer}"
 
     if not vectors_dir.exists():
         raise FileNotFoundError(f"Vectors not found at {vectors_dir}")
@@ -990,7 +991,7 @@ def run_experiment(
     test_concepts: List[str],
     n_trial_numbers: int = DEFAULT_N_TRIAL_NUMBERS,
     samples_per_trial: int = DEFAULT_SAMPLES_PER_TRIAL,
-    exp21_dir: str = DEFAULT_EXP21_DIR,
+    steering_dir: str = DEFAULT_STEERING_DIR,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     refusal_ablation_weight: float = DEFAULT_REFUSAL_ABLATION_WEIGHT,
     n_instructions: int = 128,
@@ -1072,7 +1073,7 @@ def run_experiment(
     print("=" * 80)
 
     all_done = len(completed_concepts) == len(test_concepts)
-    exp21_metrics = {}
+    steering_metrics = {}
 
     if all_done:
         print("\nAll concepts already completed! Skipping to evaluation...")
@@ -1091,22 +1092,22 @@ def run_experiment(
         print(f"  Model loaded: {n_layers} layers, d_model={model.d_model}")
 
         # =================================================================
-        # STEP 2: Load best config from Exp21
+        # STEP 2: Load best config from Experiment 02 (steering evaluation)
         # =================================================================
-        print("\n[2/6] Loading best config from Exp21...")
+        print("\n[2/6] Loading best config from Experiment 02 (steering evaluation)...")
         try:
-            steering_layer, strength, exp21_metrics = load_best_config_from_exp21(
-                exp21_dir, model_name
+            steering_layer, strength, steering_metrics = load_best_steering_config(
+                steering_dir, model_name
             )
             print(f"  Best config: layer={steering_layer}, strength={strength}")
-            print(f"  Exp21 introspection rate: "
-                  f"{exp21_metrics.get('combined_detection_and_identification_rate', 'N/A'):.2%}")
+            print(f"  Experiment 02 (steering evaluation) introspection rate: "
+                  f"{steering_metrics.get('combined_detection_and_identification_rate', 'N/A'):.2%}")
         except FileNotFoundError as e:
             print(f"  Warning: {e}")
             print("  Using default config: layer=37, strength=4.0")
             steering_layer = 37
             strength = 4.0
-            exp21_metrics = {}
+            steering_metrics = {}
 
         if steering_layer_override is not None:
             print(f"  Overriding steering layer: {steering_layer} -> {steering_layer_override}")
@@ -1116,17 +1117,17 @@ def run_experiment(
             strength = strength_override
 
         # =================================================================
-        # STEP 3: Load concept vectors from Exp21
+        # STEP 3: Load concept vectors from Experiment 02 (steering evaluation)
         # =================================================================
-        print("\n[3/6] Loading concept vectors from Exp21...")
+        print("\n[3/6] Loading concept vectors from Experiment 02 (steering evaluation)...")
         try:
-            concept_vectors = load_concept_vectors_from_exp21(
-                exp21_dir=exp21_dir,
+            concept_vectors = load_concept_vectors_from_steering(
+                steering_dir=steering_dir,
                 model_name=model_name,
                 steering_layer=steering_layer,
                 concepts=test_concepts,
             )
-            print(f"  Loaded {len(concept_vectors)} concept vectors from Exp21")
+            print(f"  Loaded {len(concept_vectors)} concept vectors from Experiment 02 (steering evaluation)")
 
             test_concepts = [c for c in test_concepts if c in concept_vectors]
             if len(test_concepts) == 0:
@@ -1731,7 +1732,7 @@ def run_experiment(
             "absolute_change": removal_introspection - baseline_introspection,
             "relative_change_pct": improvement if baseline_introspection > 0 else None,
         },
-        "exp21_metrics": exp21_metrics,
+        "steering_metrics": steering_metrics,
     }
 
     results_path = output_path / "results.json"
@@ -1953,8 +1954,8 @@ def parse_args():
     parser.add_argument("-spt", "--samples-per-trial", type=int,
                         default=DEFAULT_SAMPLES_PER_TRIAL,
                         help="Samples per trial number (default: 3)")
-    parser.add_argument("--exp21-dir", type=str, default=DEFAULT_EXP21_DIR,
-                        help="Path to Exp21 results")
+    parser.add_argument("--steering-dir", type=str, default=DEFAULT_STEERING_DIR,
+                        help="Path to Experiment 02 (steering evaluation) results")
     parser.add_argument("-o", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                         help="Output directory")
     parser.add_argument("--refusal-ablation-weight", type=float,
@@ -2017,7 +2018,7 @@ if __name__ == "__main__":
         test_concepts=test_concepts,
         n_trial_numbers=args.n_trial_numbers,
         samples_per_trial=args.samples_per_trial,
-        exp21_dir=args.exp21_dir,
+        steering_dir=args.steering_dir,
         output_dir=args.output_dir,
         refusal_ablation_weight=args.refusal_ablation_weight,
         n_instructions=args.n_instructions,

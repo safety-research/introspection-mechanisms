@@ -70,7 +70,7 @@ warnings.filterwarnings('ignore', category=UserWarning, message='.*Glyph.*missin
 
 
 # ============================================================================
-# Inlined functions from exp38 / exp27 (not in release repo)
+# Inlined functions from experiment 03d (abliteration) / prior work (not in release repo)
 # ============================================================================
 
 INTROSPECTION_USER_MESSAGE = (
@@ -235,7 +235,7 @@ QUICK_EVAL_N_CONCEPTS = 50
 QUICK_EVAL_N_TRIALS = 10
 QUICK_EVAL_N_CONTROL = 300
 
-DEFAULT_OUTPUT_DIR = "analysis/exp62_base_model_proxy"
+DEFAULT_OUTPUT_DIR = "analysis/03f_dpo_mechanism_ablation"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 

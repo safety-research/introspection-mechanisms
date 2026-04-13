@@ -1,4 +1,4 @@
-# 450 New concepts for exp21 - avoiding overlap with the 50 baseline concepts
+# 450 New concepts for experiment 02 (steering evaluation) - avoiding overlap with the 50 baseline concepts
 # Baseline concepts to AVOID: Dust, Satellites, Trumpets, Origami, Illusions, Cameras, Lightning,
 # Constellations, Treasures, Phones, Trees, Avalanches, Mirrors, Fountains, Quarries, Sadness,
 # Xylophones, Secrecy, Oceans, Happiness, Deserts, Kaleidoscopes, Sugar, Vegetables, Poetry,

@@ -12,7 +12,7 @@ Decomposition:
     where:
     - proj_ridge[c] = (v[c] . w_ridge) * w_ridge  (projection onto ridge direction)
     - delta_perp[c] = v[c] - proj_ridge[c]  (residual orthogonal to ridge direction)
-    - w_ridge is loaded from exp4_vector_decomposition primary_axis.pt
+    - w_ridge is loaded from 04b_vector_decomposition primary_axis.pt
 
 Swap conditions tested on BOTH success and failure concepts:
 
@@ -40,9 +40,9 @@ Paper references:
 - Figures: ridge-swap.pdf
 
 Dependencies:
-- exp4_vector_decomposition -> Ridge direction in primary_axis.pt
-- exp4_vector_geometry.py -> success/failure partition in subspace_analysis.json
-- exp21_more_concepts_steering -> concept vectors + baseline steering results
+- 04b_vector_decomposition -> Ridge direction in primary_axis.pt
+- 04b_vector_geometry.py -> success/failure partition in subspace_analysis.json
+- 02b_steering_500_concepts -> concept vectors + baseline steering results
 
 Usage:
     python 04d_ridge_swap.py -m gemma3_27b
@@ -78,10 +78,10 @@ from eval_utils import LLMJudge, batch_evaluate
 # Default configuration
 # ---------------------------------------------------------------------------
 DEFAULT_MODEL = "gemma3_27b"
-DEFAULT_EXP4_DIR = "analysis/exp4_vector_geometry"
-DEFAULT_EXP4_DECOMP_DIR = "analysis/exp4_vector_decomposition"
-DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
-DEFAULT_OUTPUT_DIR = "analysis/exp40_ridge_delta_swap"
+DEFAULT_GEOMETRY_DIR = "analysis/04b_vector_geometry"
+DEFAULT_GEOMETRY_DECOMP_DIR = "analysis/04b_vector_decomposition"
+DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
+DEFAULT_OUTPUT_DIR = "analysis/04d_ridge_swap"
 DEFAULT_THRESHOLD = 0.2
 DEFAULT_N_TRIAL_NUMBERS = 10
 DEFAULT_SAMPLES_PER_TRIAL = 10
@@ -150,19 +150,19 @@ def load_concept_vectors(vectors_dir: Path, concepts: List[str]) -> Dict[str, to
     return vectors
 
 
-def load_partition_from_exp4(
-    exp4_dir: Path, model_name: str,
+def load_geometry_partition(
+    geometry_dir: Path, model_name: str,
     layer_idx: int = None, strength: float = None,
 ) -> Tuple[List[str], List[str], dict]:
-    """Load success/failure partition from exp4 subspace_analysis.json."""
+    """Load success/failure partition from experiment 04b (vector geometry) subspace_analysis.json."""
     if layer_idx is not None and strength is not None:
         config_folder = f"layer_{layer_idx}_strength_{strength}"
-        subspace_path = exp4_dir / model_name / config_folder / "detection_rate" / "subspace_analysis.json"
+        subspace_path = geometry_dir / model_name / config_folder / "detection_rate" / "subspace_analysis.json"
     else:
-        subspace_path = exp4_dir / model_name / "subspace_analysis.json"
+        subspace_path = geometry_dir / model_name / "subspace_analysis.json"
 
     if not subspace_path.exists():
-        raise FileNotFoundError(f"Could not find exp4 subspace analysis at {subspace_path}")
+        raise FileNotFoundError(f"Could not find experiment 04b (vector geometry) subspace analysis at {subspace_path}")
 
     with open(subspace_path, 'r') as f:
         data = json.load(f)
@@ -177,20 +177,20 @@ def load_partition_from_exp4(
     return success_concepts, failure_concepts, metadata
 
 
-def load_exp21_baseline_per_concept(
-    exp21_dir: Path, model_name: str,
+def load_steering_baseline_per_concept(
+    steering_dir: Path, model_name: str,
     layer_idx: int = None, strength: float = None,
 ) -> Dict[str, Dict]:
-    """Load per-concept baseline results from exp21 results.json."""
+    """Load per-concept baseline results from experiment 02 (steering evaluation) results.json."""
     if layer_idx is not None and strength is not None:
         config_folder = f"layer_{layer_idx}_strength_{strength}"
-        results_path = exp21_dir / model_name / config_folder / "results.json"
+        results_path = steering_dir / model_name / config_folder / "results.json"
         if not results_path.exists():
-            raise FileNotFoundError(f"Could not find exp21 results at {results_path}")
+            raise FileNotFoundError(f"Could not find experiment 02 (steering evaluation) results at {results_path}")
     else:
-        matches = list(exp21_dir.glob(f"{model_name}/layer_*/results.json"))
+        matches = list(steering_dir.glob(f"{model_name}/layer_*/results.json"))
         if not matches:
-            raise FileNotFoundError(f"Could not find exp21 results for {model_name}")
+            raise FileNotFoundError(f"Could not find experiment 02 (steering evaluation) results for {model_name}")
         results_path = matches[0]
 
     with open(results_path, 'r') as f:
@@ -234,18 +234,18 @@ def load_exp21_baseline_per_concept(
 
 
 def load_ridge_direction(
-    exp4_decomp_dir: Path, model_name: str,
+    geometry_decomp_dir: Path, model_name: str,
     layer: int, strength: float, metric: str = "detection_rate",
 ) -> torch.Tensor:
-    """Load the unit-normalized ridge regression direction from exp4_vector_decomposition."""
+    """Load the unit-normalized ridge regression direction from 04b_vector_decomposition."""
     ridge_path = (
-        exp4_decomp_dir / model_name
+        geometry_decomp_dir / model_name
         / f"layer_{layer}_strength_{strength}" / metric / "primary_axis.pt"
     )
     if not ridge_path.exists():
         raise FileNotFoundError(
             f"Ridge direction not found at {ridge_path}. "
-            f"Run exp4_vector_decomposition.py first."
+            f"Run 04b_vector_decomposition.py first."
         )
     w_ridge = torch.load(ridge_path, map_location="cpu", weights_only=True)
     if isinstance(w_ridge, dict):
@@ -1102,9 +1102,9 @@ def create_plots(
 
 def run_experiment(
     model_name: str,
-    exp4_dir: Path,
-    exp4_decomp_dir: Path,
-    exp21_dir: Path,
+    geometry_dir: Path,
+    geometry_decomp_dir: Path,
+    steering_dir: Path,
     output_dir: Path,
     threshold: float,
     trials_per_concept: int,
@@ -1150,14 +1150,14 @@ def run_experiment(
 
     # Load partition
     print("\nLoading concept partition...")
-    success_concepts, failure_concepts, partition_metadata = load_partition_from_exp4(
-        exp4_dir, model_name, layer_idx=layer_idx, strength=strength
+    success_concepts, failure_concepts, partition_metadata = load_geometry_partition(
+        geometry_dir, model_name, layer_idx=layer_idx, strength=strength
     )
     print(f"  Success: {len(success_concepts)}, Failure: {len(failure_concepts)}")
 
     # Load vectors
     print("\nLoading concept vectors...")
-    vectors_dir = exp21_dir / model_name / "vectors" / f"layer_{layer_idx}"
+    vectors_dir = steering_dir / model_name / "vectors" / f"layer_{layer_idx}"
     if not vectors_dir.exists():
         raise FileNotFoundError(f"Vectors directory not found: {vectors_dir}")
     vectors = load_concept_vectors(vectors_dir, success_concepts + failure_concepts)
@@ -1167,7 +1167,7 @@ def run_experiment(
 
     # Load ridge direction and decompose
     print("\nLoading ridge direction and computing decomposition...")
-    w_ridge = load_ridge_direction(exp4_decomp_dir, model_name, layer_idx, strength)
+    w_ridge = load_ridge_direction(geometry_decomp_dir, model_name, layer_idx, strength)
     w_ridge, ridge_scores_success, deltas_success, ridge_scores_failure, deltas_failure = (
         compute_ridge_decomposition(vectors, w_ridge, success_with_vectors, failure_with_vectors)
     )
@@ -1188,9 +1188,9 @@ def run_experiment(
         failure_with_vectors, success_with_vectors, vectors, "nearest_neighbor", seed + 1000)
 
     # Load baseline
-    print("\nLoading baseline results from exp21...")
-    baseline_per_concept = load_exp21_baseline_per_concept(
-        exp21_dir, model_name, layer_idx=layer_idx, strength=strength)
+    print("\nLoading baseline results from experiment 02 (steering evaluation)...")
+    baseline_per_concept = load_steering_baseline_per_concept(
+        steering_dir, model_name, layer_idx=layer_idx, strength=strength)
 
     # Determine what needs to run
     active_succ = SUCCESS_CONDITIONS
@@ -1412,12 +1412,12 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Ridge Projection vs. Residual Decomposition Swap Experiments")
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL, help="Model name")
-    parser.add_argument("--exp4-dir", default=DEFAULT_EXP4_DIR,
-                        help="Path to exp4_vector_geometry results")
-    parser.add_argument("--exp4-decomp-dir", default=DEFAULT_EXP4_DECOMP_DIR,
-                        help="Path to exp4_vector_decomposition results")
-    parser.add_argument("--exp21-dir", default=DEFAULT_EXP21_DIR,
-                        help="Path to exp21 results")
+    parser.add_argument("--geometry-dir", default=DEFAULT_GEOMETRY_DIR,
+                        help="Path to 04b_vector_geometry results")
+    parser.add_argument("--geometry-decomp-dir", default=DEFAULT_GEOMETRY_DECOMP_DIR,
+                        help="Path to 04b_vector_decomposition results")
+    parser.add_argument("--steering-dir", default=DEFAULT_STEERING_DIR,
+                        help="Path to experiment 02 (steering evaluation) results")
     parser.add_argument("-od", "--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("-t", "--threshold", type=float, default=DEFAULT_THRESHOLD,
                         help="Success/failure threshold")
@@ -1446,9 +1446,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    exp4_dir = Path(args.exp4_dir)
-    exp4_decomp_dir = Path(args.exp4_decomp_dir)
-    exp21_dir = Path(args.exp21_dir)
+    geometry_dir = Path(args.geometry_dir)
+    geometry_decomp_dir = Path(args.geometry_decomp_dir)
+    steering_dir = Path(args.steering_dir)
     output_dir = Path(args.output_dir)
 
     # Plots-only mode
@@ -1483,9 +1483,9 @@ def main():
 
     run_experiment(
         model_name=args.model,
-        exp4_dir=exp4_dir,
-        exp4_decomp_dir=exp4_decomp_dir,
-        exp21_dir=exp21_dir,
+        geometry_dir=geometry_dir,
+        geometry_decomp_dir=geometry_decomp_dir,
+        steering_dir=steering_dir,
         output_dir=output_dir,
         threshold=args.threshold,
         trials_per_concept=trials_per_concept,

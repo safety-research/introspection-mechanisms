@@ -43,6 +43,7 @@ from tqdm import tqdm
 
 # Add src/ to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from model_utils import ModelWrapper
 from steering_utils import MODELS_WITHOUT_SYSTEM_ROLE
@@ -52,8 +53,8 @@ from steering_utils import MODELS_WITHOUT_SYSTEM_ROLE
 # Constants and Paths
 # =============================================================================
 
-CACHE_BASE = Path("analysis/exp50_cached_activations")
-VECTORS_PATH = Path("analysis/exp21_more_concepts_steering/gemma3_27b/vectors")
+CACHE_BASE = Path("analysis/08_cached_activations")
+VECTORS_PATH = Path("analysis/02b_steering_500_concepts/gemma3_27b/vectors")
 FEATURE_LABELS_PATH = Path("feature_labels")
 TRANSCODER_FOLDER = "transcoder_all"
 
@@ -80,7 +81,7 @@ def get_transcoder_l0_tag() -> str:
 
 
 # =============================================================================
-# Transcoder Loading (inlined from exp48_mlp_transcoder)
+# Transcoder Loading (inlined from 07_mlp_transcoder)
 # =============================================================================
 
 class JumpReLUSAE(torch.nn.Module):
@@ -174,7 +175,7 @@ def load_transcoders(layers: List[int]) -> Dict[int, JumpReLUSAE]:
 
 
 # =============================================================================
-# Data Loading Utilities (inlined from exp50_circuit_ablation)
+# Data Loading Utilities (inlined from 09_circuit_ablation)
 # =============================================================================
 
 def _ensure_dense(x):
@@ -187,7 +188,7 @@ def _ensure_dense(x):
 
 
 def load_concept_vectors(steering_layer: int) -> Dict[str, torch.Tensor]:
-    """Load concept vectors from exp21."""
+    """Load concept vectors from experiment 02 (steering evaluation)."""
     possible_paths = [
         VECTORS_PATH / f"layer_{steering_layer}",
         VECTORS_PATH / f"L{steering_layer}",
@@ -282,7 +283,7 @@ def get_feature_label(layer: int, feature_id: int) -> str:
 
 
 # =============================================================================
-# Prompt Building (inlined from exp50_circuit_ablation)
+# Prompt Building (inlined from 09_circuit_ablation)
 # =============================================================================
 
 INTROSPECTION_SYSTEM_MESSAGE = ""
@@ -297,7 +298,7 @@ INTROSPECTION_ASSISTANT_ACK = "Ok."
 
 
 def build_introspection_messages(trial_number: int = 1) -> List[Dict[str, str]]:
-    """Build the introspection prompt messages matching exp1/exp21 format."""
+    """Build the introspection prompt messages matching vw_data/experiment 02 (steering evaluation) format."""
     return [
         {"role": "system", "content": INTROSPECTION_SYSTEM_MESSAGE},
         {"role": "user", "content": INTROSPECTION_USER_MESSAGE},
@@ -395,16 +396,16 @@ def load_concept_active_features(
 ) -> List[Dict]:
     """Load features active (> threshold) for specified concepts at a steering config.
 
-    Uses cached activation matrices (from exp50_combined_analysis). When
+    Uses cached activation matrices (from 08_combined_analysis). When
     use_delta_from_control is True, filters by |act@steered - act@control| > threshold
     to capture both activated and suppressed features.
     """
     transcoder_l0 = get_transcoder_l0_tag()
-    from exp50_combined_analysis import (
-        discover_cached_strengths,
-        get_layer_matrix_cached,
-        get_control_cache_file,
-    )
+    import importlib
+    _fca = importlib.import_module("08_feature_centric_analysis")
+    discover_cached_strengths = _fca.discover_cached_strengths
+    get_layer_matrix_cached = _fca.get_layer_matrix_cached
+    get_control_cache_file = _fca.get_control_cache_file
 
     strengths_map = discover_cached_strengths(steering_layer, token_mode, transcoder_l0)
     cache_file = strengths_map.get(steering_strength)
@@ -485,7 +486,7 @@ def load_concept_active_features(
 
 
 # =============================================================================
-# Control Ablation Hook (simplified from exp50_circuit_ablation)
+# Control Ablation Hook (simplified from 09_circuit_ablation)
 # =============================================================================
 
 class ControlAblationHook:
@@ -693,14 +694,14 @@ def get_output_dir(args) -> Path:
         dir_name = f"{timestamp}_{args.concept}_{gate_str}_L{args.steering_layer}"
     else:
         dir_name = f"{timestamp}_{args.concept}_logit_attribution_L{args.steering_layer}"
-    output_dir = Path("analysis/exp50_causal_pathway") / _variant_subdir() / dir_name
+    output_dir = Path("analysis/09b_causal_pathway") / _variant_subdir() / dir_name
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 
 
 def find_latest_output_dir(args) -> Optional[Path]:
     """Find the most recent output directory matching the given concept/gate/layer."""
-    base = Path("analysis/exp50_causal_pathway") / _variant_subdir()
+    base = Path("analysis/09b_causal_pathway") / _variant_subdir()
     if not base.exists():
         return None
     if args.gate_feature and args.gate_feature != (0, 0):
@@ -736,9 +737,9 @@ def get_feature_title_from_gemma_scope(
 def get_concept_detection_rate(
     concept: str, steering_layer: int = 37, strength: float = 4.0
 ) -> Optional[float]:
-    """Load detection rate for a concept from exp21 results."""
+    """Load detection rate for a concept from experiment 02 (steering evaluation) results."""
     results_path = Path(
-        f"analysis/exp21_more_concepts_steering/gemma3_27b/"
+        f"analysis/02b_steering_500_concepts/gemma3_27b/"
         f"layer_{steering_layer}_strength_{strength}/results.json"
     )
     if not results_path.exists():
@@ -828,7 +829,7 @@ def load_all_steering_tokens_control(concept: str, needed_layers: Optional[List[
 
 
 # =============================================================================
-# Experiment 1: Virtual Weights Analysis
+# Concept Injection: Virtual Weights Analysis
 # =============================================================================
 
 def experiment_virtual_weights(
@@ -1276,7 +1277,9 @@ def experiment_ablation_sweep(
     steering_vec = concept_vectors[concept].to(device)
 
     # Determine available strengths
-    from exp50_combined_analysis import discover_cached_strengths
+    import importlib
+    _fca = importlib.import_module("08_feature_centric_analysis")
+    discover_cached_strengths = _fca.discover_cached_strengths
     strengths_map = discover_cached_strengths(steering_layer, "last_token", TRANSCODER_L0, transcoder_width=TRANSCODER_WIDTH)
     available_strengths = sorted(strengths_map.keys())
     all_strengths = sorted(set([0.0] + available_strengths))
@@ -2280,10 +2283,10 @@ def main():
                     return json.load(f)
             return None
 
-        exp1 = _load_json("exp1_virtual_weights.json")
-        if exp1:
-            plot_virtual_weights_histogram(exp1, output_dir)
-            plot_top_connected_features(exp1, output_dir, top_n=20)
+        vw_data = _load_json("virtual_weights.json")
+        if vw_data:
+            plot_virtual_weights_histogram(vw_data, output_dir)
+            plot_top_connected_features(vw_data, output_dir, top_n=20)
         grad = _load_json("gradient_attribution.json")
         if grad:
             plot_gradient_attribution(grad, output_dir, top_n=20)
@@ -2293,7 +2296,7 @@ def main():
         circ = _load_json("circuit_importance_validation.json")
         if circ:
             plot_circuit_importance_validation(circ, output_dir, concept=args.concept)
-        ablation = _load_json("exp4_ablation_sweep.json")
+        ablation = _load_json("ablation_sweep.json")
         if ablation:
             plot_ablation_comparison(ablation, output_dir, steering_layer=args.steering_layer)
         print(f"\n  PLOTS REGENERATED: {output_dir}")
@@ -2318,7 +2321,7 @@ def main():
     run_gate_experiments = args.gate_feature != (0, 0)
     candidates = []
     transcoders = {}
-    exp1_results = {}
+    injection_results = {}
     gradient_results = None
     alignment_results = None
 
@@ -2349,16 +2352,16 @@ def main():
             transcoders = load_transcoders(sorted(set(priority_layers)))
 
         # Virtual Weights
-        exp1_results = experiment_virtual_weights(
+        injection_results = experiment_virtual_weights(
             transcoders=transcoders,
             gate_feature=args.gate_feature,
             candidate_features=candidates,
             top_k=args.top_k,
         )
-        with open(output_dir / "exp1_virtual_weights.json", "w") as f:
-            json.dump(exp1_results, f, indent=2)
-        plot_virtual_weights_histogram(exp1_results, output_dir)
-        plot_top_connected_features(exp1_results, output_dir, top_n=20)
+        with open(output_dir / "virtual_weights.json", "w") as f:
+            json.dump(injection_results, f, indent=2)
+        plot_virtual_weights_histogram(injection_results, output_dir)
+        plot_top_connected_features(injection_results, output_dir, top_n=20)
 
     # Model-dependent experiments
     model = None
@@ -2453,8 +2456,8 @@ def main():
 
     # Ablation Sweep
     if run_gate_experiments and args.run_ablation and upstream_candidates:
-        all_candidate_features = exp1_results.get("all_features", [])
-        exp4_results = experiment_ablation_sweep(
+        all_candidate_features = injection_results.get("all_features", [])
+        geometry_results = experiment_ablation_sweep(
             model=model, transcoders=transcoders, concept_vectors=concept_vectors,
             gate_feature=args.gate_feature, concept=args.concept,
             steering_layer=args.steering_layer,
@@ -2464,9 +2467,9 @@ def main():
             preloaded_control_activations=cached_control_activations,
             preloaded_control_prompt_data=cached_control_prompt_data,
         )
-        with open(output_dir / "exp4_ablation_sweep.json", "w") as f:
-            json.dump(exp4_results, f, indent=2)
-        plot_ablation_comparison(exp4_results, output_dir, steering_layer=args.steering_layer)
+        with open(output_dir / "ablation_sweep.json", "w") as f:
+            json.dump(geometry_results, f, indent=2)
+        plot_ablation_comparison(geometry_results, output_dir, steering_layer=args.steering_layer)
 
     print("\n" + "=" * 60)
     print("ANALYSIS COMPLETE")

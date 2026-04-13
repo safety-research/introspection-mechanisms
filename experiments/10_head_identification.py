@@ -58,8 +58,8 @@ def parse_args():
     parser.add_argument("-nt", "--n-trials", type=int, default=5, help="Trials per concept")
     parser.add_argument("-l", "--layer", type=int, default=38, help="Steering layer (default: 38)")
     parser.add_argument("-s", "--strength", type=float, default=4.0, help="Steering strength (default: 4.0)")
-    parser.add_argument("--exp21-dir", type=str, default="analysis/exp21_more_concepts_steering", help="Path to exp21 results for concept vectors")
-    parser.add_argument("-od", "--output-dir", type=str, default="analysis/exp51_automatic_head_identification")
+    parser.add_argument("--steering-dir", type=str, default="analysis/02b_steering_500_concepts", help="Path to experiment 02 (steering evaluation) results for concept vectors")
+    parser.add_argument("-od", "--output-dir", type=str, default="analysis/10_head_identification")
     parser.add_argument("-mt", "--max-tokens", type=int, default=100)
     parser.add_argument("-t", "--temperature", type=float, default=1.0)
     parser.add_argument("-d", "--device", type=str, default="cuda")
@@ -82,8 +82,8 @@ def parse_args():
 def build_messages(trial_num: int = 1) -> List[Dict[str, str]]:
     """Build the standard introspection prompt as multi-turn messages.
 
-    This matches the canonical format used in exp21_backwards_steering.py and
-    exp51_head_ablation.py for consistency across experiments.
+    This matches the canonical format used in 02_steering_evaluation.py and
+    11_head_ablation.py for consistency across experiments.
     """
     preamble = (
         "I am an interpretability researcher studying transformer-based language models like you. "
@@ -103,18 +103,18 @@ def build_messages(trial_num: int = 1) -> List[Dict[str, str]]:
 
 
 def load_concept_vectors(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     concepts: Optional[List[str]] = None,
     n_sample: int = 20,
     layer_fraction: float = 0.61
 ) -> Dict[str, torch.Tensor]:
-    """Load concept vectors from exp21.
+    """Load concept vectors from experiment 02 (steering evaluation).
 
-    exp21 stores vectors in subdirectories by layer fraction:
+    experiment 02 (steering evaluation) stores vectors in subdirectories by layer fraction:
     vectors/layer_0.61/Bread.pt, etc.
     """
-    base_vectors_dir = Path(exp21_dir) / model_name / "vectors"
+    base_vectors_dir = Path(steering_dir) / model_name / "vectors"
 
     if not base_vectors_dir.exists():
         raise FileNotFoundError(f"Vectors directory not found: {base_vectors_dir}")
@@ -166,7 +166,7 @@ def load_concept_vectors(
 
 
 def load_successful_concepts(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     layer_fraction: float = 0.61,
     strength: float = 4.0,
@@ -178,7 +178,7 @@ def load_successful_concepts(
     """
     # Find the results file
     results_path = None
-    base_dir = Path(exp21_dir) / model_name
+    base_dir = Path(steering_dir) / model_name
 
     # Look for results matching the layer and strength
     for subdir in base_dir.iterdir():
@@ -1322,12 +1322,12 @@ def main():
     print(f"Steering at layer {args.layer} with strength {args.strength}")
 
     # Load concept vectors
-    # Compute layer fraction for loading vectors from exp21
+    # Compute layer fraction for loading vectors from experiment 02 (steering evaluation)
     layer_fraction = args.layer / n_layers
-    print(f"\nLoading concept vectors from {args.exp21_dir}")
+    print(f"\nLoading concept vectors from {args.steering_dir}")
     print(f"(Layer {args.layer} = fraction {layer_fraction:.2f})")
     concept_vectors = load_concept_vectors(
-        args.exp21_dir,
+        args.steering_dir,
         args.model,
         args.concepts,
         n_sample=args.n_concepts,
@@ -1349,7 +1349,7 @@ def main():
         successful_concepts = None
         if "successful" in args.gradient_modes:
             successful_concepts = load_successful_concepts(
-                args.exp21_dir,
+                args.steering_dir,
                 args.model,
                 layer_fraction=layer_fraction,
                 strength=args.strength
