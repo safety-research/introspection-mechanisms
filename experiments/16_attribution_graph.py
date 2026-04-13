@@ -707,7 +707,6 @@ def run_strength_scan(
 
     Returns list of {strength, metrics} dicts sorted by strength.
     """
-    from steering_utils import run_steered_introspection_test
     from eval_utils import LLMJudge, batch_evaluate, compute_detection_and_identification_metrics
 
     judge = LLMJudge()
@@ -720,19 +719,6 @@ def run_strength_scan(
             prompt_str, input_ids, seq_len = format_prompt(messages, model_wrapper.tokenizer)
             steer_start = find_steering_start(model_wrapper.tokenizer, prompt_str, trial_num)
 
-            # Steered generation
-            hook_handle = get_layers(model_wrapper.model)[injection_layer].register_forward_hook(
-                lambda m, i, o, s=strength: (
-                    (lambda h, r: ((h + torch.zeros_like(h).index_copy_(1,
-                        torch.arange(steer_start, h.shape[1], device=h.device),
-                        (concept_vector.to(h.device).float() * s).unsqueeze(0).expand(-1, h.shape[1] - steer_start, -1)
-                    )),) + r)(o[0], o[1:]) if isinstance(o, tuple) else o
-                )
-            )
-            # Simpler: use the existing generate method
-            hook_handle.remove()
-
-            # Use model's generate with a steering hook
             sv = concept_vector.to(device).float() * strength
 
             def make_hook():
