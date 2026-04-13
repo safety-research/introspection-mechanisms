@@ -46,6 +46,7 @@ We investigate the mechanisms underlying introspective awareness in large langua
 │   ├── 04e_mean_diff_steering.py         # Mean-diff direction causal validation (Appendix D)
 │   ├── 04f_mean_diff_exploration.py      # Mean-diff direction interpretation (Appendix D)
 │   ├── 04g_pretraining_alignment.py      # Pretraining corpus projection analysis (Appendix D)
+│   ├── 04h_aggregation_analysis.py       # Verbalizability + ridge R² on transcoder features (§4.3)
 │   ├── 05_negative_steering.py           # Negative direction steering
 │   ├── 05b_steering_prompts.py           # Prompt definitions for steering experiments
 │   ├── 06_activation_patching.py         # Per-layer activation patching (§5.2)
