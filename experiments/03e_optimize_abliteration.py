@@ -48,56 +48,26 @@ MODEL_ID = "google/gemma-3-27b-it"
 RESULTS_DIR = "analysis/exp39_optimization_results"
 MAX_TOKENS = 100
 
-# Starting weights (20 sub-regions, split from Trial 92 14-region config)
-# Sub-regions inherit parent weight. Regions with 5+ layers were split.
-# Best known weights (Trial 3087, combined=0.876). Used to seed fresh studies only.
+# Starting weights (14 contiguous regions as described in Appendix F).
 BASE_WEIGHTS = {
-    "very_early_a": 0.010190365613071925,   # Layers 0-2
-    "very_early_b": 0.09976487098474057,    # Layers 3-5
-    "very_early_c": 0.009846349798252014,   # Layers 6-8
-    "very_early_d": 0.010714741304450688,   # Layers 9-10
-    "early_a": 0.023812035217103455,        # Layers 11-13
-    "early_b": 0.006873821994170306,        # Layers 14-15
-    "early_c": 0.0023568060724657135,       # Layers 16-18
-    "early_d": 0.11762696391562547,         # Layers 19-20
-    "pre_key_a": 0.024324361266584712,      # Layers 21-24
-    "pre_key_b": 0.009936585603088419,      # Layers 25-28
-    "key_a": 0.000533052460819306,          # Layers 29-32
-    "key_b": 0.0057508808893361974,         # Layers 33-35
-    "mid_a": 0.020646470409482434,          # Layers 36-38
-    "mid_b": 0.02205567035624907,           # Layers 39-41
-    "mid_c": 0.004716948598867072,          # Layers 42-44
-    "mid_d": 0.003251529189292551,          # Layers 45-47
-    "late_a": 0.07694211978232157,          # Layers 48-51
-    "late_b": 0.03330589279564281,          # Layers 52-55
-    "final_a": 2.358688691270255e-05,       # Layers 56-58
-    "final_b": 0.003955462234418926,        # Layers 59-61
+    "region_0_5":   0.01,    # Layers 0-5
+    "region_6_10":  0.01,    # Layers 6-10
+    "region_11_15": 0.015,   # Layers 11-15
+    "region_16_20": 0.06,    # Layers 16-20
+    "region_21_24": 0.024,   # Layers 21-24
+    "region_25_28": 0.01,    # Layers 25-28
+    "region_29_32": 0.0005,  # Layers 29-32
+    "region_33_35": 0.006,   # Layers 33-35
+    "region_36_41": 0.02,    # Layers 36-41
+    "region_42_47": 0.004,   # Layers 42-47
+    "region_48_51": 0.077,   # Layers 48-51
+    "region_52_55": 0.033,   # Layers 52-55
+    "region_56_58": 0.0001,  # Layers 56-58
+    "region_59_61": 0.004,   # Layers 59-61
 }
 
-# Data-driven search bounds: derived from max of top-100 trials * 1.5x headroom.
-# NOT derived from BASE_WEIGHTS (single best trial has outlier-low values for some params).
-SEARCH_BOUNDS = {
-    "very_early_a": (0.0, 0.09001),    # Layers 0-2
-    "very_early_b": (0.0, 0.17042),    # Layers 3-5
-    "very_early_c": (0.0, 0.01495),    # Layers 6-8
-    "very_early_d": (0.0, 0.01262),    # Layers 9-10
-    "early_a": (0.0, 0.03777),         # Layers 11-13
-    "early_b": (0.0, 0.06006),         # Layers 14-15
-    "early_c": (0.0, 0.05214),         # Layers 16-18
-    "early_d": (0.0, 0.16975),         # Layers 19-20
-    "pre_key_a": (0.0, 0.04635),       # Layers 21-24
-    "pre_key_b": (0.0, 0.05272),       # Layers 25-28
-    "key_a": (0.0, 0.00095),           # Layers 29-32
-    "key_b": (0.0, 0.00656),           # Layers 33-35
-    "mid_a": (0.0, 0.02943),           # Layers 36-38
-    "mid_b": (0.0, 0.02945),           # Layers 39-41
-    "mid_c": (0.0, 0.00660),           # Layers 42-44
-    "mid_d": (0.0, 0.00643),           # Layers 45-47
-    "late_a": (0.0, 0.55031),          # Layers 48-51
-    "late_b": (0.0, 0.03339),          # Layers 52-55
-    "final_a": (0.0, 0.00010),         # Layers 56-58
-    "final_b": (0.0, 0.00810),         # Layers 59-61
-}
+# Search bounds: [0, 1.2 * w_base] for each region.
+SEARCH_BOUNDS = {k: (0.0, 1.2 * v) for k, v in BASE_WEIGHTS.items()}
 
 # Test settings
 HARMFUL_RUNS = 20  # 200 total (10 prompts x 20 runs) for stable coherence estimates
@@ -117,7 +87,7 @@ HARMFUL_PROMPTS = [
 ]
 
 # Optimization settings
-N_TRIALS = 340  # Number of Optuna trials (20 regions)
+N_TRIALS = 500  # Number of Optuna trials (14 regions)
 
 # Judge mode: controls how the LLM judge evaluates harm.
 #   "batched"    = Old style: simplified prompts, 10 items per judge call, JSON array output.
@@ -132,30 +102,24 @@ JUDGE_MODE = "batched"
 # MODEL CLASS
 # ============================================================================
 class RegionAblationModel:
-    """Model with 20-region weight system for fine-grained ablation optimization."""
+    """Model with 14-region weight system for ablation optimization (Appendix F)."""
 
-    # Layer boundaries for 20 sub-regions (inclusive end indices)
+    # Layer boundaries for 14 contiguous regions (inclusive end indices)
     REGION_BOUNDARIES = {
-        "very_early_a_end": 2,   # Layers 0-2
-        "very_early_b_end": 5,   # Layers 3-5
-        "very_early_c_end": 8,   # Layers 6-8
-        "very_early_d_end": 10,  # Layers 9-10
-        "early_a_end": 13,       # Layers 11-13
-        "early_b_end": 15,       # Layers 14-15
-        "early_c_end": 18,       # Layers 16-18
-        "early_d_end": 20,       # Layers 19-20
-        "pre_key_a_end": 24,      # Layers 21-24
-        "pre_key_b_end": 28,      # Layers 25-28
-        "key_a_end": 32,          # Layers 29-32
-        "key_b_end": 35,          # Layers 33-35
-        "mid_a_end": 38,         # Layers 36-38
-        "mid_b_end": 41,         # Layers 39-41
-        "mid_c_end": 44,         # Layers 42-44
-        "mid_d_end": 47,         # Layers 45-47
-        "late_a_end": 51,         # Layers 48-51
-        "late_b_end": 55,         # Layers 52-55
-        "final_a_end": 58,        # Layers 56-58
-        # final_b: 59-61
+        "region_0_5_end":   5,    # Layers 0-5
+        "region_6_10_end":  10,   # Layers 6-10
+        "region_11_15_end": 15,   # Layers 11-15
+        "region_16_20_end": 20,   # Layers 16-20
+        "region_21_24_end": 24,   # Layers 21-24
+        "region_25_28_end": 28,   # Layers 25-28
+        "region_29_32_end": 32,   # Layers 29-32
+        "region_33_35_end": 35,   # Layers 33-35
+        "region_36_41_end": 41,   # Layers 36-41
+        "region_42_47_end": 47,   # Layers 42-47
+        "region_48_51_end": 51,   # Layers 48-51
+        "region_52_55_end": 55,   # Layers 52-55
+        "region_56_58_end": 58,   # Layers 56-58
+        # region_59_61: 59-61
     }
 
     def __init__(self):
@@ -197,48 +161,14 @@ class RegionAblationModel:
             self.hooks.append(hook)
 
     def _get_layer_weight(self, layer_idx: int) -> float:
-        """Get weight for layer using 20 sub-regions."""
+        """Get weight for layer using 14 contiguous regions."""
         b = self.REGION_BOUNDARIES
-        if layer_idx <= b["very_early_a_end"]:
-            return self.region_weights.get("very_early_a", 0.0)  # Layers 0-2
-        elif layer_idx <= b["very_early_b_end"]:
-            return self.region_weights.get("very_early_b", 0.0)  # Layers 3-5
-        elif layer_idx <= b["very_early_c_end"]:
-            return self.region_weights.get("very_early_c", 0.0)  # Layers 6-8
-        elif layer_idx <= b["very_early_d_end"]:
-            return self.region_weights.get("very_early_d", 0.0)  # Layers 9-10
-        elif layer_idx <= b["early_a_end"]:
-            return self.region_weights.get("early_a", 0.0)       # Layers 11-13
-        elif layer_idx <= b["early_b_end"]:
-            return self.region_weights.get("early_b", 0.0)       # Layers 14-15
-        elif layer_idx <= b["early_c_end"]:
-            return self.region_weights.get("early_c", 0.0)       # Layers 16-18
-        elif layer_idx <= b["early_d_end"]:
-            return self.region_weights.get("early_d", 0.0)       # Layers 19-20
-        elif layer_idx <= b["pre_key_a_end"]:
-            return self.region_weights.get("pre_key_a", 0.0)      # Layers 21-24
-        elif layer_idx <= b["pre_key_b_end"]:
-            return self.region_weights.get("pre_key_b", 0.0)      # Layers 25-28
-        elif layer_idx <= b["key_a_end"]:
-            return self.region_weights.get("key_a", 0.0)          # Layers 29-32
-        elif layer_idx <= b["key_b_end"]:
-            return self.region_weights.get("key_b", 0.0)          # Layers 33-35
-        elif layer_idx <= b["mid_a_end"]:
-            return self.region_weights.get("mid_a", 0.0)         # Layers 36-38
-        elif layer_idx <= b["mid_b_end"]:
-            return self.region_weights.get("mid_b", 0.0)         # Layers 39-41
-        elif layer_idx <= b["mid_c_end"]:
-            return self.region_weights.get("mid_c", 0.0)         # Layers 42-44
-        elif layer_idx <= b["mid_d_end"]:
-            return self.region_weights.get("mid_d", 0.0)         # Layers 45-47
-        elif layer_idx <= b["late_a_end"]:
-            return self.region_weights.get("late_a", 0.0)         # Layers 48-51
-        elif layer_idx <= b["late_b_end"]:
-            return self.region_weights.get("late_b", 0.0)         # Layers 52-55
-        elif layer_idx <= b["final_a_end"]:
-            return self.region_weights.get("final_a", 0.0)        # Layers 56-58
-        else:
-            return self.region_weights.get("final_b", 0.0)        # Layers 59-61
+        region_names = list(BASE_WEIGHTS.keys())
+        for name in region_names[:-1]:  # All except last
+            end_key = f"{name}_end"
+            if end_key in b and layer_idx <= b[end_key]:
+                return self.region_weights.get(name, 0.0)
+        return self.region_weights.get(region_names[-1], 0.0)  # Last region (59-61)
 
     def _make_hook(self, layer_idx: int):
         weight = self._get_layer_weight(layer_idx)
