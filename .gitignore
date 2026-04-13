@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[codz]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.envrc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+*.log
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+wandb/
+.cache/
+cache/
+
+# Large analysis outputs (regenerate by running experiment scripts)
+analysis/
