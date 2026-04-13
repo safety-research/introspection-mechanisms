@@ -446,6 +446,413 @@ def _model_name_to_sae_size(model_name: str) -> str:
 
 
 # =============================================================================
+# Auto-Config: Logit Lens + Strength Scan → pos/neg tokens + optimal strength
+# =============================================================================
+
+def extract_logit_lens(
+    model_wrapper: ModelWrapper,
+    concept: str,
+    concept_vector: torch.Tensor,
+    injection_layer: int,
+    strength: float,
+    output_dir: Path,
+    trial_num: int = 1,
+    top_k: int = 20,
+    device: str = "cuda",
+) -> Optional[Path]:
+    """Run one forward pass with steering, capture residual at last prefill token,
+    project through final norm + unembedding to get top-k token probs at each layer.
+
+    Saves a JSON with per-layer token probabilities and logits.
+    """
+    tokenizer = model_wrapper.tokenizer
+    inner = model_wrapper.model
+
+    # Get norm and unembedding
+    mdl = inner
+    if hasattr(mdl, "language_model"):
+        norm_fn = mdl.language_model.norm
+        unemb = mdl.lm_head.weight if hasattr(mdl, "lm_head") else None
+    elif hasattr(mdl, "model") and hasattr(mdl.model, "norm"):
+        norm_fn = mdl.model.norm
+        unemb = mdl.lm_head.weight if hasattr(mdl, "lm_head") else None
+    else:
+        norm_fn = getattr(mdl, "norm", None)
+        unemb = getattr(mdl, "lm_head", None)
+        if unemb is not None:
+            unemb = unemb.weight
+    if norm_fn is None or unemb is None:
+        print("  WARNING: Could not find norm/unemb in model, skipping logit lens")
+        return None
+
+    norm_fn = norm_fn.to(device).eval()
+    vocab_size = min(len(tokenizer), unemb.shape[0])
+    unemb = unemb[:vocab_size].float().to(device)
+
+    # Build prompt and find steering start
+    messages = build_messages(trial_num)
+    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
+    input_ids = input_ids.to(device)
+    attention_mask = torch.ones_like(input_ids).to(device)
+    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
+
+    n_layers = model_wrapper.n_layers
+    layers_module = get_layers(inner)
+    steering_vec = concept_vector.to(device).float()
+
+    # Steering hook
+    def make_hook(s):
+        def hook(module, input, output):
+            h = output[0] if isinstance(output, tuple) else output
+            rest = output[1:] if isinstance(output, tuple) else ()
+            addition = torch.zeros_like(h)
+            addition[:, steering_start:, :] = (steering_vec * s).unsqueeze(0)
+            modified = h + addition
+            return (modified,) + rest if isinstance(output, tuple) else modified
+        return hook
+
+    # Capture residual at each layer
+    act_hooks = ActivationHooks(inner, retain_grad=False)
+    act_hooks.register_hooks(list(range(n_layers)), ["output"])
+    handle = layers_module[injection_layer].register_forward_hook(make_hook(strength))
+
+    try:
+        with act_hooks:
+            inner.eval()
+            with torch.no_grad():
+                _ = inner(input_ids=input_ids, attention_mask=attention_mask,
+                          output_hidden_states=False, return_dict=True)
+    finally:
+        handle.remove()
+        act_hooks.remove_hooks()
+
+    activations = act_hooks.get_activations()
+    last_pos = seq_len - 1
+
+    # Project each layer's residual through norm + unembed
+    all_layers_tokens = {}
+    for layer_idx in range(n_layers):
+        key = f"layer_{layer_idx}.output"
+        if key not in activations or not activations[key]:
+            continue
+        resid = activations[key][0]
+        if isinstance(resid, (list, tuple)):
+            resid = resid[0]
+        resid = resid.detach().float()[0, last_pos, :].to(device)
+
+        with torch.no_grad():
+            normed = norm_fn(resid.unsqueeze(0))
+            logits_l = (normed.float() @ unemb.T)[0]
+            probs_l = F.softmax(logits_l, dim=-1)
+            top_probs, top_ids = torch.topk(probs_l, k=top_k)
+            top_logits = logits_l[top_ids]
+
+        layer_list = []
+        for i in range(top_ids.shape[0]):
+            tid = top_ids[i].item()
+            layer_list.append({
+                "token_id": int(tid),
+                "token_str": tokenizer.decode([tid]),
+                "logit": float(top_logits[i].item()),
+                "prob": float(top_probs[i].item()),
+            })
+        all_layers_tokens[str(layer_idx)] = layer_list
+
+    out_data = {
+        "strength": strength, "layer": injection_layer, "concept": concept,
+        "trial_num": trial_num, "last_prefill_pos": int(last_pos), "top_k": top_k,
+        "last_layer": n_layers - 1 if all_layers_tokens else None,
+        "all_layers": all_layers_tokens,
+    }
+
+    strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
+    out_path = output_dir / strength_str / f"logit_lens_trial{trial_num}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(out_data, f, indent=2)
+
+    torch.cuda.empty_cache()
+    return out_path
+
+
+def detect_tokens_and_crossover(
+    logit_lens_dir: Path, trial_num: int = 1,
+) -> Tuple[int, int, Optional[float], Optional[float], Dict[str, Any]]:
+    """Auto-detect pos/neg token IDs and crossover strength from logit lens sweep.
+
+    Strategy:
+    - neg_token: top-1 token at strength=0 (baseline)
+    - pos_token: first different token to dominate (prob > 0.5)
+    - crossover_strength: where pos first dominates
+    - plateau_end: where pos prob drops below 0.3 after crossover
+
+    Returns (pos_token_id, neg_token_id, crossover_strength, plateau_end, info).
+    """
+    # Load all logit lens JSONs
+    by_strength: Dict[float, Dict] = {}
+    for d in sorted(logit_lens_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        m = re.match(r"strength_(\d+)_(\d+)", d.name)
+        if not m:
+            continue
+        s = float(f"{m.group(1)}.{m.group(2)}")
+        ll_path = d / f"logit_lens_trial{trial_num}.json"
+        if ll_path.exists():
+            with open(ll_path) as f:
+                by_strength[s] = json.load(f)
+
+    if not by_strength:
+        raise ValueError(f"No logit lens data found in {logit_lens_dir}")
+
+    sorted_strengths = sorted(by_strength.keys())
+
+    def get_last_layer_tokens(data):
+        all_layers = data.get("all_layers", {})
+        last = data.get("last_layer")
+        return all_layers.get(str(last), []) if last is not None else []
+
+    # neg_token: top-1 at lowest strength
+    baseline_tokens = get_last_layer_tokens(by_strength[sorted_strengths[0]])
+    if not baseline_tokens:
+        raise ValueError("No tokens at baseline strength")
+    neg_token_id = baseline_tokens[0]["token_id"]
+    neg_token_str = baseline_tokens[0]["token_str"]
+
+    # pos_token: first different token with prob > 0.5
+    pos_token_id, pos_token_str, crossover_strength = None, None, None
+    for s in sorted_strengths:
+        tokens = get_last_layer_tokens(by_strength[s])
+        if tokens and tokens[0]["token_id"] != neg_token_id and tokens[0].get("prob", 0) > 0.5:
+            pos_token_id = tokens[0]["token_id"]
+            pos_token_str = tokens[0]["token_str"]
+            crossover_strength = s
+            break
+
+    # Fallback: token with highest max prob across non-baseline strengths
+    if pos_token_id is None:
+        token_max_probs: Dict[int, float] = {}
+        token_strs: Dict[int, str] = {}
+        for s in sorted_strengths[1:]:
+            for t in get_last_layer_tokens(by_strength[s])[:5]:
+                tid = t["token_id"]
+                if tid != neg_token_id:
+                    p = t.get("prob", 0)
+                    if tid not in token_max_probs or p > token_max_probs[tid]:
+                        token_max_probs[tid] = p
+                        token_strs[tid] = t["token_str"]
+        if token_max_probs:
+            pos_token_id = max(token_max_probs, key=token_max_probs.get)
+            pos_token_str = token_strs[pos_token_id]
+        else:
+            raise ValueError("Could not detect pos token from logit lens")
+
+    # plateau_end: where pos prob drops below 0.3 after crossover
+    plateau_end = sorted_strengths[-1]
+    if crossover_strength is not None:
+        past = False
+        for s in sorted_strengths:
+            if s >= crossover_strength:
+                past = True
+            if not past:
+                continue
+            pos_prob = 0.0
+            for t in get_last_layer_tokens(by_strength[s])[:5]:
+                if t["token_id"] == pos_token_id:
+                    pos_prob = t.get("prob", 0)
+                    break
+            if pos_prob < 0.3:
+                plateau_end = s
+                break
+
+    info = {
+        "pos_token_id": pos_token_id, "pos_token_str": pos_token_str,
+        "neg_token_id": neg_token_id, "neg_token_str": neg_token_str,
+        "crossover_strength": crossover_strength, "plateau_end": plateau_end,
+    }
+    return pos_token_id, neg_token_id, crossover_strength, plateau_end, info
+
+
+def run_strength_scan(
+    model_wrapper: ModelWrapper,
+    concept: str,
+    concept_vector: torch.Tensor,
+    injection_layer: int,
+    strengths: List[float],
+    output_dir: Path,
+    n_trials: int = 3,
+    device: str = "cuda",
+) -> List[Dict]:
+    """Run strength scan: generate responses at each strength, evaluate with LLM judge.
+
+    Returns list of {strength, metrics} dicts sorted by strength.
+    """
+    from steering_utils import run_steered_introspection_test
+    from eval_utils import LLMJudge, batch_evaluate, compute_detection_and_identification_metrics
+
+    judge = LLMJudge()
+    sweep = []
+
+    for strength in tqdm(strengths, desc="Strength scan"):
+        trial_results = []
+        for trial_num in range(1, n_trials + 1):
+            messages = build_messages(trial_num)
+            prompt_str, input_ids, seq_len = format_prompt(messages, model_wrapper.tokenizer)
+            steer_start = find_steering_start(model_wrapper.tokenizer, prompt_str, trial_num)
+
+            # Steered generation
+            hook_handle = get_layers(model_wrapper.model)[injection_layer].register_forward_hook(
+                lambda m, i, o, s=strength: (
+                    (lambda h, r: ((h + torch.zeros_like(h).index_copy_(1,
+                        torch.arange(steer_start, h.shape[1], device=h.device),
+                        (concept_vector.to(h.device).float() * s).unsqueeze(0).expand(-1, h.shape[1] - steer_start, -1)
+                    )),) + r)(o[0], o[1:]) if isinstance(o, tuple) else o
+                )
+            )
+            # Simpler: use the existing generate method
+            hook_handle.remove()
+
+            # Use model's generate with a steering hook
+            sv = concept_vector.to(device).float() * strength
+
+            def make_hook():
+                def hook(module, input, output):
+                    h = output[0] if isinstance(output, tuple) else output
+                    rest = output[1:] if isinstance(output, tuple) else ()
+                    addition = torch.zeros_like(h)
+                    addition[:, steer_start:, :] = sv.unsqueeze(0)
+                    return (h + addition,) + rest if isinstance(output, tuple) else h + addition
+                return hook
+
+            handle = get_layers(model_wrapper.model)[injection_layer].register_forward_hook(make_hook())
+            try:
+                response = model_wrapper.generate(
+                    prompt=prompt_str, max_new_tokens=100, temperature=0.0,
+                )
+            finally:
+                handle.remove()
+
+            trial_results.append({
+                "concept": concept, "trial_type": "injection",
+                "response": response, "trial_num": trial_num,
+            })
+
+        # Evaluate with LLM judge
+        evaluations = batch_evaluate(judge, trial_results, [concept])
+        metrics = compute_detection_and_identification_metrics(evaluations)
+        sweep.append({"strength": strength, "metrics": metrics})
+
+    sweep.sort(key=lambda r: r["strength"])
+
+    # Save
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "strength_scan_results.json", "w") as f:
+        json.dump({"sweep_results": sweep}, f, indent=2)
+
+    return sweep
+
+
+def select_optimal_strength_from_signals(
+    sweep: List[Dict],
+    crossover_strength: Optional[float],
+    plateau_end: Optional[float],
+    detection_threshold: float = 0.5,
+) -> Tuple[float, Dict[str, Any]]:
+    """Select s* from the intersection of logit lens crossover and behavioral detection.
+
+    Strategy:
+    1. Filter to strengths >= crossover (token has flipped)
+    2. Among those, find where detection_hit_rate >= threshold
+    3. Pick ~70% through the good region
+    """
+    crossover = crossover_strength if crossover_strength is not None else 0.0
+    p_end = plateau_end if plateau_end is not None else 8.0
+
+    if not sweep:
+        optimal = crossover + 0.7 * (p_end - crossover)
+        return optimal, {"method": "logit_lens_only", "optimal_strength": optimal}
+
+    good = [r["strength"] for r in sweep
+            if r["strength"] >= crossover
+            and r.get("metrics", {}).get("detection_hit_rate", 0) >= detection_threshold]
+
+    if good:
+        optimal = good[0] + 0.7 * (good[-1] - good[0])
+        all_s = [r["strength"] for r in sweep]
+        optimal = min(all_s, key=lambda s: abs(s - optimal))
+        return optimal, {"method": "intersection", "optimal_strength": optimal,
+                         "n_good": len(good), "range": [good[0], good[-1]]}
+
+    optimal = crossover + 0.7 * (p_end - crossover)
+    return optimal, {"method": "logit_lens_fallback", "optimal_strength": optimal}
+
+
+def run_auto_config(args) -> None:
+    """Auto-configure: detect pos/neg tokens and optimal strength for a concept."""
+    concept = args.concept
+    layer = args.layer
+    run_name = f"{concept.replace(' ', '_')}_layer{layer}"
+    base_out = Path(args.output_dir) / args.model / run_name
+    ll_dir = base_out / "auto_config" / "logit_lens"
+    scan_dir = base_out / "auto_config" / "strength_scan"
+    ll_dir.mkdir(parents=True, exist_ok=True)
+    scan_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print(f"AUTO CONFIG: {concept} layer {layer}")
+    print("=" * 70)
+
+    mw = load_model(args.model, device=args.device, dtype=args.dtype,
+                     quantization=getattr(args, "quantization", None))
+    vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+    if concept not in vectors:
+        print(f"  ERROR: No vector for {concept}")
+        return
+    vec = vectors[concept]
+
+    # Step 1: Logit lens sweep
+    n_ll = getattr(args, "n_ll_strengths", 51)
+    ll_strengths = np.linspace(0, getattr(args, "strength_max", DEFAULT_STRENGTH_MAX), n_ll).tolist()
+    print(f"\n  Step 1: Logit lens sweep ({len(ll_strengths)} strengths)...")
+    for s in tqdm(ll_strengths, desc="Logit lens"):
+        extract_logit_lens(mw, concept, vec, layer, s, ll_dir, device=args.device)
+
+    pos_id, neg_id, crossover, plateau_end, token_info = detect_tokens_and_crossover(ll_dir)
+    print(f"    neg_token (s=0): {token_info['neg_token_str']!r} (id={neg_id})")
+    print(f"    pos_token: {token_info['pos_token_str']!r} (id={pos_id})")
+    print(f"    crossover: {crossover}, plateau_end: {plateau_end}")
+
+    # Step 2: Strength scan with LLM judge
+    n_scan = getattr(args, "n_scan_strengths", 25)
+    scan_strengths = np.linspace(0, getattr(args, "strength_max", DEFAULT_STRENGTH_MAX), n_scan).tolist()
+    print(f"\n  Step 2: Strength scan ({len(scan_strengths)} strengths)...")
+    try:
+        sweep = run_strength_scan(mw, concept, vec, layer, scan_strengths, scan_dir,
+                                  n_trials=getattr(args, "n_scan_trials", 3), device=args.device)
+    except Exception as e:
+        print(f"    Strength scan failed ({e}), using logit lens only")
+        sweep = []
+
+    # Step 3: Select s*
+    optimal_s, sel_info = select_optimal_strength_from_signals(sweep, crossover, plateau_end)
+    print(f"\n  s* = {optimal_s:.2f} ({sel_info['method']})")
+
+    # Save config
+    config = {
+        "concept": concept, "layer": layer,
+        "pos_token_id": pos_id, "neg_token_id": neg_id,
+        "pos_token_str": token_info.get("pos_token_str"),
+        "neg_token_str": token_info.get("neg_token_str"),
+        "optimal_strength": optimal_s,
+        "token_detection": token_info, "strength_selection": sel_info,
+    }
+    config_path = base_out / "auto_config" / "auto_config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"  Config saved: {config_path}")
+
+
+# =============================================================================
 # Section A: SA Extraction
 # =============================================================================
 
@@ -1366,6 +1773,13 @@ def parse_args():
     common.add_argument("--pos-token-id", type=int, default=None)
     common.add_argument("--neg-token-id", type=int, default=None)
 
+    # auto-config
+    p0 = subparsers.add_parser("auto-config", parents=[common], help="Auto-detect pos/neg tokens and optimal strength")
+    p0.add_argument("--n-ll-strengths", type=int, default=51, help="Logit lens strength grid size")
+    p0.add_argument("--n-scan-strengths", type=int, default=25, help="Behavioral scan grid size")
+    p0.add_argument("--n-scan-trials", type=int, default=3, help="Trials per strength for LLM judge")
+    p0.add_argument("--strength-max", type=float, default=DEFAULT_STRENGTH_MAX)
+
     # extract-sa
     p1 = subparsers.add_parser("extract-sa", parents=[common], help="Extract SA at one strength")
     p1.add_argument("-s", "--strength", type=float, default=DEFAULT_STRENGTH)
@@ -1405,7 +1819,7 @@ def parse_args():
 def main():
     args = parse_args()
     if args.phase is None:
-        print("Specify a phase: extract-sa, compute-isa, build-graph, visualize, or all")
+        print("Specify a phase: auto-config, extract-sa, compute-isa, build-graph, visualize, or all")
         return
 
     concept = args.concept
@@ -1421,6 +1835,10 @@ def main():
     run_name = f"{concept.replace(' ', '_')}_layer{layer}"
     base_out = Path(args.output_dir) / args.model / run_name
     base_out.mkdir(parents=True, exist_ok=True)
+
+    if args.phase == "auto-config":
+        run_auto_config(args)
+        return
 
     if args.phase == "extract-sa":
         print(f"Extracting SA for {concept} layer {layer} strength {args.strength}")
