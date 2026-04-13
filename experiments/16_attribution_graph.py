@@ -893,7 +893,7 @@ def compute_isa(sa_dir: Path, trial_nums: List[int] = None) -> None:
                 continue
             ss = np.array([p[0] for p in sa_curve])
             sa = np.array([p[1] for p in sa_curve])
-            isa_val = float(np.trapz(sa, ss))
+            isa_val = float(np.trapezoid(sa, ss))
             isa_records.append({
                 "layer": key[0], "sae_type": key[1],
                 "feature_id": key[2], "token_pos": key[3],
@@ -1059,7 +1059,7 @@ def select_upstream_features(
     s_arr = np.array(sorted_strengths)
     weights = {}
     for key, sa_arr in feat_sa_dict.items():
-        weights[key] = float(np.trapz(sa_arr, s_arr))
+        weights[key] = float(np.trapezoid(sa_arr, s_arr))
 
     # IQR outlier selection
     records = [{"layer": k[0], "sae_type": k[1], "feature_id": k[2],
@@ -1190,62 +1190,37 @@ def export_graph_json(graph: AttributionGraph, path: Path) -> None:
     print(f"  Graph JSON: {path}")
 
 
-def render_graphviz(graph: AttributionGraph, path: Path) -> None:
+def render_pdf_from_html(html_path: Path, pdf_path: Path) -> None:
+    """Generate PDF from an HTML file. Tries playwright first, falls back to weasyprint."""
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        import graphviz
-    except ImportError:
-        print("  graphviz not installed, skipping PDF. pip install graphviz")
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"file://{html_path.resolve()}")
+            page.wait_for_timeout(2000)
+            page.pdf(path=str(pdf_path), format="A3", landscape=True, print_background=True)
+            browser.close()
+        print(f"  PDF (playwright): {pdf_path}")
         return
+    except Exception:
+        pass
 
-    COLORS = {"transcoder_all": "#4C72B0", "attn_out_all": "#DD8452",
-              "mlp_out_all": "#55A868", "resid_post_all": "#C44E52", "root": "#333333"}
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["chromium", "--headless", "--disable-gpu", "--no-sandbox",
+             f"--print-to-pdf={pdf_path}", str(html_path.resolve())],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and pdf_path.exists():
+            print(f"  PDF (chromium): {pdf_path}")
+            return
+    except Exception:
+        pass
 
-    dot = graphviz.Digraph(
-        format="pdf", engine="dot",
-        graph_attr={"rankdir": "BT", "splines": "true", "nodesep": "0.5",
-                     "ranksep": "0.8", "fontsize": "10",
-                     "label": f"Attribution Graph\nstrength={graph.optimal_strength:.2f}"},
-        node_attr={"fontsize": "9", "style": "filled"},
-        edge_attr={"fontsize": "8"},
-    )
-
-    layers = sorted(set(n.layer for n in graph.nodes.values() if n.layer >= 0))
-    max_isa = max((abs(n.isa_value) for n in graph.nodes.values() if n.layer >= 0), default=1)
-
-    for lv in layers:
-        with dot.subgraph() as s:
-            s.attr(rank="same")
-            for node in graph.nodes.values():
-                if node.layer != lv:
-                    continue
-                nid = f"L{node.layer}_{node.sae_type}_F{node.feature_id}_T{node.token_pos}"
-                color = COLORS.get(node.sae_type, "#999")
-                size = 0.3 + 0.7 * (abs(node.isa_value) / max_isa)
-                label = node.short_name()
-                if node.label:
-                    label += f"\n{node.label[:40]}"
-                label += f"\nISA={node.isa_value:.3f}"
-                s.node(nid, label=label, fillcolor=color, fontcolor="white",
-                       width=str(size), shape="box", penwidth="2")
-
-    dot.node("root", label="dL/ds", shape="ellipse",
-             fillcolor=COLORS["root"], fontcolor="white", width="1.2")
-
-    max_w = max((abs(e.weight) for e in graph.edges), default=1)
-    for edge in graph.edges:
-        src = graph.nodes.get(edge.source_key)
-        if src is None:
-            continue
-        sid = f"L{src.layer}_{src.sae_type}_F{src.feature_id}_T{src.token_pos}"
-        tid = "root" if edge.target_key == graph.root_key else \
-              f"L{edge.target_key[0]}_{edge.target_key[1]}_F{edge.target_key[2]}_T{edge.target_key[3]}"
-        pw = str(0.5 + 3.0 * abs(edge.weight) / max_w)
-        c = "#C44E52" if edge.weight > 0 else "#4C72B0"
-        dot.edge(sid, tid, label=f"{edge.weight:.3f}", penwidth=pw, color=c, fontcolor=c)
-
-    stem = str(path.with_suffix(""))
-    dot.render(stem, cleanup=True)
-    print(f"  Graphviz PDF: {stem}.pdf")
+    print(f"  PDF generation skipped (install playwright: pip install playwright && playwright install chromium)")
 
 
 def render_interactive(graph: AttributionGraph, path: Path) -> None:
@@ -1476,7 +1451,7 @@ def main():
         graph_dir = base_out / "graphs"
         graph_dir.mkdir(parents=True, exist_ok=True)
         export_graph_json(graph, graph_dir / "attribution_graph.json")
-        render_graphviz(graph, graph_dir / "attribution_graph")
+        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         render_interactive(graph, graph_dir / "attribution_graph.html")
         write_graph_summary(graph, graph_dir / "graph_summary.txt", concept, layer)
 
@@ -1496,7 +1471,7 @@ def main():
             graph.edges.append(FeatureEdge(
                 tuple(ed["source"]), tuple(ed["target"]), ed["weight"], ed.get("hop", 0)))
         graph_dir = base_out / "graphs"
-        render_graphviz(graph, graph_dir / "attribution_graph")
+        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         render_interactive(graph, graph_dir / "attribution_graph.html")
         write_graph_summary(graph, graph_dir / "graph_summary.txt", concept, layer)
 
@@ -1536,7 +1511,7 @@ def main():
         graph_dir = base_out / "graphs"
         graph_dir.mkdir(parents=True, exist_ok=True)
         export_graph_json(graph, graph_dir / "attribution_graph.json")
-        render_graphviz(graph, graph_dir / "attribution_graph")
+        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         render_interactive(graph, graph_dir / "attribution_graph.html")
         write_graph_summary(graph, graph_dir / "graph_summary.txt", concept, layer)
 
