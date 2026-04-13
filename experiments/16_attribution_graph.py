@@ -892,6 +892,143 @@ def _load_sg_cache(cache_path: Path, device: str = "cpu") -> Dict[Tuple[int, str
     return tangent_data
 
 
+@dataclass
+class _SAContext:
+    """Shared context for SA extraction functions."""
+    inner: Any  # model.model
+    tokenizer: Any
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    seq_len: int
+    steering_start: int
+    steering_vec: torch.Tensor
+    n_layers: int
+    model_size: str
+    layers_module: Any  # nn.ModuleList
+    device: str
+
+
+def _prepare_sa_context(
+    model_wrapper: ModelWrapper,
+    concept_vector: torch.Tensor,
+    trial_num: int,
+    device: str,
+) -> _SAContext:
+    """Prepare shared context for SA extraction (prompt, tokenization, steering)."""
+    tokenizer = model_wrapper.tokenizer
+    inner = model_wrapper.model
+    messages = build_messages(trial_num)
+    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
+    input_ids = input_ids.to(device)
+    attention_mask = torch.ones_like(input_ids).to(device)
+    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
+    return _SAContext(
+        inner=inner, tokenizer=tokenizer,
+        input_ids=input_ids, attention_mask=attention_mask,
+        seq_len=seq_len, steering_start=steering_start,
+        steering_vec=concept_vector.to(device).float(),
+        n_layers=model_wrapper.n_layers,
+        model_size=_model_name_to_sae_size(model_wrapper.model_name),
+        layers_module=get_layers(inner),
+        device=device,
+    )
+
+
+def _make_steering_hook(ctx: _SAContext, s):
+    """Create a steering hook that adds steering_vec * s at steering_start."""
+    def hook(module, input, output):
+        h = output[0] if isinstance(output, tuple) else output
+        rest = output[1:] if isinstance(output, tuple) else ()
+        addition = torch.zeros_like(h)
+        addition[:, ctx.steering_start:, :] = (ctx.steering_vec * s).unsqueeze(0)
+        modified = h + addition
+        return (modified,) + rest if isinstance(output, tuple) else modified
+    return hook
+
+
+def _preload_saes(
+    layer_lo: int, layer_hi: int,
+    sae_width: str, sae_l0: str, model_size: str,
+) -> Dict[Tuple[int, str], JumpReLUSAE]:
+    """Preload SAEs to CPU for a layer range."""
+    unique_types = set(SAE_TYPE_LOAD_MAP.get(st, st) for st in SAE_TYPES)
+    cache: Dict[Tuple[int, str], JumpReLUSAE] = {}
+    for li in tqdm(range(layer_lo, layer_hi), desc="Preloading SAEs", leave=False):
+        for st in unique_types:
+            try:
+                sae = load_sae(li, sae_width, sae_l0, st, model_size, True, "cpu")
+                cache[(li, st)] = sae.eval()
+            except Exception:
+                pass
+    return cache
+
+
+def _run_jvp_and_collect_tangents(
+    ctx: _SAContext,
+    jvp_primal: torch.Tensor,
+    jvp_tangent: torch.Tensor,
+    jvp_fn,
+    layer_lo: int,
+    layer_hi: int,
+) -> Dict[Tuple[int, str], torch.Tensor]:
+    """Run JVP and collect tangent data indexed by (layer, suffix)."""
+    _, site_tangents = torch.func.jvp(jvp_fn, (jvp_primal,), (jvp_tangent,))
+    tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
+    for li_offset, li in enumerate(range(layer_lo, layer_hi)):
+        for j, suffix in enumerate(JVP_SITE_SUFFIXES):
+            idx = li_offset * len(JVP_SITE_SUFFIXES) + j
+            tangent_data[(li, suffix)] = site_tangents[idx].detach()
+    del site_tangents
+    torch.cuda.empty_cache()
+    return tangent_data
+
+
+def _project_tangents_to_features(
+    tangent_data: Dict[Tuple[int, str], torch.Tensor],
+    sae_cache: Dict[Tuple[int, str], JumpReLUSAE],
+    layer_lo: int,
+    layer_hi: int,
+    device: str,
+    base_meta: Dict[str, Any],
+    threshold: float = 1e-8,
+) -> List[Dict[str, Any]]:
+    """Project tangent data onto SAE encoder directions, return feature rows.
+
+    Used by forward SA to convert JVP tangents into per-feature attributions.
+    """
+    rows: List[Dict[str, Any]] = []
+    with torch.no_grad():
+        for li in range(layer_lo, layer_hi):
+            for st in SAE_TYPES:
+                in_sfx = SAE_TYPE_KEYS[st][0]
+                lt = SAE_TYPE_LOAD_MAP.get(st, st)
+                if (li, lt) not in sae_cache:
+                    continue
+                tkey = (li, in_sfx)
+                if tkey not in tangent_data:
+                    continue
+                dx = tangent_data[tkey].to(device).float()
+                if dx.dim() == 3:
+                    dx = dx[0]
+
+                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
+                fwd_jvp = dx @ sae.w_enc  # [seq_len, d_sae]
+                nonzero = (fwd_jvp.abs() > threshold)
+                tok_idx, feat_idx = nonzero.nonzero(as_tuple=True)
+
+                if len(tok_idx) > 0:
+                    vals = fwd_jvp[tok_idx, feat_idx]
+                    for i in range(len(tok_idx)):
+                        rows.append({
+                            **base_meta, "layer": li, "token_pos": tok_idx[i].item(),
+                            "sae_type": st, "feature_id": feat_idx[i].item(),
+                            "steering_attribution": vals[i].item(),
+                        })
+                sae.to("cpu")
+                torch.cuda.empty_cache()
+    return rows
+
+
 def _extract_sa_core(
     model_wrapper: ModelWrapper,
     concept: str,
@@ -937,67 +1074,35 @@ def _extract_sa_core(
         List of row dicts ready for pd.DataFrame / parquet.
     """
     is_root = target is None
-    tokenizer = model_wrapper.tokenizer
-    inner = model_wrapper.model
-
-    # Build prompt
-    messages = build_messages(trial_num)
-    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
-    input_ids = input_ids.to(device)
-    attention_mask = torch.ones_like(input_ids).to(device)
-    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
-
-    n_layers = model_wrapper.n_layers
-    model_size = _model_name_to_sae_size(model_wrapper.model_name)
-    steering_vec = concept_vector.to(device).float()
-    layers_module = get_layers(inner)
+    ctx = _prepare_sa_context(model_wrapper, concept_vector, trial_num, device)
+    inner = ctx.inner
+    n_layers = ctx.n_layers
+    seq_len = ctx.seq_len
 
     # Layer range: all layers for root, injection..target for feature-targeted
     if is_root:
-        layer_lo, layer_hi = 0, n_layers  # [0, n_layers)
+        layer_lo, layer_hi = 0, n_layers
     else:
         layer_lo = injection_layer
-        layer_hi = target["layer"]  # exclusive: don't include target layer itself
+        layer_hi = target["layer"]
 
-    # Hook range for activation capture: include target_layer+1 for feature-targeted
-    # (need target site activation to compute loss)
     hook_hi = n_layers if is_root else target["layer"] + 1
 
-    # Preload SAEs to CPU
-    unique_types = set(SAE_TYPE_LOAD_MAP.get(st, st) for st in SAE_TYPES)
-    sae_cache: Dict[Tuple[int, str], JumpReLUSAE] = {}
-    for li in tqdm(range(layer_lo, layer_hi), desc="Preloading SAEs", leave=False):
-        for st in unique_types:
-            try:
-                sae = load_sae(li, sae_width, sae_l0, st, model_size, True, "cpu")
-                sae_cache[(li, st)] = sae.eval()
-            except Exception:
-                pass
+    sae_cache = _preload_saes(layer_lo, layer_hi, sae_width, sae_l0, ctx.model_size)
 
-    # For feature-targeted mode, also load the target SAE
     target_sae = None
     if not is_root:
         tgt_load = SAE_TYPE_LOAD_MAP.get(target["sae_type"], target["sae_type"])
-        target_sae = load_sae(target["layer"], sae_width, sae_l0, tgt_load, model_size, True, device)
-
-    def make_steering_hook(s):
-        def hook(module, input, output):
-            h = output[0] if isinstance(output, tuple) else output
-            rest = output[1:] if isinstance(output, tuple) else ()
-            addition = torch.zeros_like(h)
-            addition[:, steering_start:, :] = (steering_vec * s).unsqueeze(0)
-            modified = h + addition
-            return (modified,) + rest if isinstance(output, tuple) else modified
-        return hook
+        target_sae = load_sae(target["layer"], sae_width, sae_l0, tgt_load, ctx.model_size, True, device)
 
     def run_forward(s, retain_grad=False):
-        handle = layers_module[injection_layer].register_forward_hook(make_steering_hook(s))
+        handle = ctx.layers_module[injection_layer].register_forward_hook(_make_steering_hook(ctx, s))
         hooks = ActivationHooks(inner, retain_grad=retain_grad)
         hooks.register_hooks(list(range(layer_lo, hook_hi)), CAPTURE_TYPES_SAE)
         try:
             with hooks:
                 inner.eval()
-                out = inner(input_ids=input_ids, attention_mask=attention_mask,
+                out = inner(input_ids=ctx.input_ids, attention_mask=ctx.attention_mask,
                             output_hidden_states=False, return_dict=True)
         finally:
             handle.remove()
@@ -1068,14 +1173,14 @@ def _extract_sa_core(
         alpha_primal = torch.tensor(strength, dtype=torch.float32, device=device)
         alpha_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
 
-        def jvp_forward(alpha_val):
-            handle = layers_module[injection_layer].register_forward_hook(make_steering_hook(alpha_val))
+        def jvp_forward_sg(alpha_val):
+            handle = ctx.layers_module[injection_layer].register_forward_hook(_make_steering_hook(ctx, alpha_val))
             hooks = ActivationHooks(inner, retain_grad=False)
             hooks.register_hooks(list(range(layer_lo, layer_hi)), CAPTURE_TYPES_SAE)
             try:
                 with hooks:
                     inner.eval()
-                    _ = inner(input_ids=input_ids, attention_mask=attention_mask,
+                    _ = inner(input_ids=ctx.input_ids, attention_mask=ctx.attention_mask,
                               output_hidden_states=False, return_dict=True)
             finally:
                 handle.remove()
@@ -1091,16 +1196,8 @@ def _extract_sa_core(
                     result.append(t[0] if t.dim() == 3 else t)
             return result
 
-        _, site_tangents = torch.func.jvp(jvp_forward, (alpha_primal,), (alpha_tangent,))
-
-        tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
-        for li_offset, li in enumerate(range(layer_lo, layer_hi)):
-            for j, suffix in enumerate(JVP_SITE_SUFFIXES):
-                idx = li_offset * len(JVP_SITE_SUFFIXES) + j
-                tangent_data[(li, suffix)] = site_tangents[idx].detach()
-
-        del site_tangents
-        torch.cuda.empty_cache()
+        tangent_data = _run_jvp_and_collect_tangents(
+            ctx, alpha_primal, alpha_tangent, jvp_forward_sg, layer_lo, layer_hi)
 
         # Root mode: save SG to cache for reuse by hop-1+ targets
         if is_root and sg_cache_file:
@@ -1593,73 +1690,41 @@ def extract_forward_sa(
 ) -> Optional[Path]:
     """Forward SA: JVP from source feature's decoder direction → downstream features.
 
-    Perturbation tangent = w_dec[source_feature] at source_layer.
-    Captures how downstream features respond to activating the source.
-    The resulting SA is multiplied by GA_root (from root SA cache) during edge weight computation.
+    Reuses _prepare_sa_context, _preload_saes, _run_jvp_and_collect_tangents,
+    and _project_tangents_to_features from the shared SA infrastructure.
     """
     import pandas as pd
 
-    tokenizer = model_wrapper.tokenizer
-    inner = model_wrapper.model
-    messages = build_messages(trial_num)
-    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
-    input_ids = input_ids.to(device)
-    attention_mask = torch.ones_like(input_ids).to(device)
-    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
-    n_layers = model_wrapper.n_layers
-    model_size = _model_name_to_sae_size(model_wrapper.model_name)
-    steering_vec = concept_vector.to(device).float()
-    layers_module = get_layers(inner)
+    ctx = _prepare_sa_context(model_wrapper, concept_vector, trial_num, device)
+    n_layers = ctx.n_layers
+    layer_lo = source_layer + 1  # downstream of source
 
-    # Load source SAE to get w_dec
+    # Load source w_dec
     src_load_type = SAE_TYPE_LOAD_MAP.get(source_sae_type, source_sae_type)
-    src_sae = load_sae(source_layer, sae_width, sae_l0, src_load_type, model_size, True, device)
+    src_sae = load_sae(source_layer, sae_width, sae_l0, src_load_type, ctx.model_size, True, device)
     source_dec_vec = src_sae.w_dec[source_feature_id].detach().clone().to(device).float()
     src_sae.to("cpu")
 
-    # Preload downstream SAEs
-    sae_cache: Dict[Tuple[int, str], JumpReLUSAE] = {}
-    unique_types = set(SAE_TYPE_LOAD_MAP.get(st, st) for st in SAE_TYPES)
-    for li in range(source_layer + 1, n_layers):
-        for st in unique_types:
-            try:
-                sae = load_sae(li, sae_width, sae_l0, st, model_size, True, "cpu")
-                sae_cache[(li, st)] = sae.eval()
-            except Exception:
-                pass
+    sae_cache = _preload_saes(layer_lo, n_layers, sae_width, sae_l0, ctx.model_size)
 
-    def make_steering_hook(s):
-        def hook(module, input, output):
-            h = output[0] if isinstance(output, tuple) else output
-            rest = output[1:] if isinstance(output, tuple) else ()
-            addition = torch.zeros_like(h)
-            addition[:, steering_start:, :] = (steering_vec * s).unsqueeze(0)
-            return (h + addition,) + rest if isinstance(output, tuple) else h + addition
-        return hook
+    # Determine perturbation hook site based on SAE type
+    if source_sae_type == "attn_out_all":
+        src_module = ctx.layers_module[source_layer].self_attn.o_proj
+    elif source_sae_type in ("transcoder_all", "mlp_out_all"):
+        src_module = getattr(ctx.layers_module[source_layer], "post_feedforward_layernorm",
+                             ctx.layers_module[source_layer])
+    else:
+        src_module = ctx.layers_module[source_layer]
 
-    # Forward JVP: tangent = w_dec[source] at source layer
-    # Steering is applied at fixed strength (not differentiated)
+    # JVP: tangent = w_dec[source] at source layer, steering fixed
     t_primal = torch.tensor(0.0, dtype=torch.float32, device=device)
     t_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
 
-    # Determine where to add perturbation based on SAE type
-    in_suffix = SAE_TYPE_KEYS[source_sae_type][0]
-
-    def jvp_forward(t_val):
+    def jvp_forward_fwd(t_val):
         perturbation = source_dec_vec * t_val
 
-        # Steering hook (fixed strength)
-        steer_h = layers_module[injection_layer].register_forward_hook(
-            make_steering_hook(torch.tensor(strength, dtype=torch.float32, device=device)))
-
-        # Source perturbation hook
-        if source_sae_type == "attn_out_all":
-            src_module = layers_module[source_layer].self_attn.o_proj
-        elif source_sae_type in ("transcoder_all", "mlp_out_all"):
-            src_module = getattr(layers_module[source_layer], "post_feedforward_layernorm",
-                                 layers_module[source_layer])
-        else:
-            src_module = layers_module[source_layer]
+        steer_h = ctx.layers_module[injection_layer].register_forward_hook(
+            _make_steering_hook(ctx, torch.tensor(strength, dtype=torch.float32, device=device)))
 
         def src_hook(module, input, output):
             h = output[0] if isinstance(output, tuple) else output
@@ -1668,13 +1733,13 @@ def extract_forward_sa(
             return (h + p,) + rest if isinstance(output, tuple) else h + p
         src_h = src_module.register_forward_hook(src_hook)
 
-        act_hooks = ActivationHooks(inner, retain_grad=False)
-        act_hooks.register_hooks(list(range(source_layer + 1, n_layers)), CAPTURE_TYPES_SAE)
+        act_hooks = ActivationHooks(ctx.inner, retain_grad=False)
+        act_hooks.register_hooks(list(range(layer_lo, n_layers)), CAPTURE_TYPES_SAE)
         try:
             with act_hooks:
-                inner.eval()
-                _ = inner(input_ids=input_ids, attention_mask=attention_mask,
-                          output_hidden_states=False, return_dict=True)
+                ctx.inner.eval()
+                _ = ctx.inner(input_ids=ctx.input_ids, attention_mask=ctx.attention_mask,
+                              output_hidden_states=False, return_dict=True)
         finally:
             steer_h.remove()
             src_h.remove()
@@ -1682,7 +1747,7 @@ def extract_forward_sa(
 
         raw = act_hooks.get_activations()
         result = []
-        for li in range(source_layer + 1, n_layers):
+        for li in range(layer_lo, n_layers):
             for sfx in JVP_SITE_SUFFIXES:
                 ak = _act_key(li, sfx)
                 t = raw[ak][0] if ak in raw and raw[ak] else torch.zeros(1, device=device)
@@ -1691,56 +1756,20 @@ def extract_forward_sa(
                 result.append(t[0] if t.dim() == 3 else t)
         return result
 
-    _, tangents = torch.func.jvp(jvp_forward, (t_primal,), (t_tangent,))
+    tangent_data = _run_jvp_and_collect_tangents(
+        ctx, t_primal, t_tangent, jvp_forward_fwd, layer_lo, n_layers)
 
-    # Project tangents onto SAE encoder directions
-    rows: List[Dict] = []
+    # Project tangents onto SAE encoder directions (reuse shared helper)
     base_meta = {
         "concept": concept, "injection_layer": injection_layer,
         "injection_strength": strength, "trial_num": trial_num,
         "source_layer": source_layer, "source_sae_type": source_sae_type,
         "source_feature_id": source_feature_id, "source_token_pos": source_token_pos,
     }
+    rows = _project_tangents_to_features(
+        tangent_data, sae_cache, layer_lo, n_layers, device, base_meta)
 
-    with torch.no_grad():
-        tang_idx = 0
-        for li in range(source_layer + 1, n_layers):
-            for st in SAE_TYPES:
-                in_sfx = SAE_TYPE_KEYS[st][0]
-                lt = SAE_TYPE_LOAD_MAP.get(st, st)
-                if (li, lt) not in sae_cache:
-                    tang_idx += 1
-                    continue
-
-                # Find the tangent for this layer's input suffix
-                sfx_idx = JVP_SITE_SUFFIXES.index(in_sfx) if in_sfx in JVP_SITE_SUFFIXES else -1
-                if sfx_idx < 0:
-                    continue
-                glob_idx = (li - source_layer - 1) * len(JVP_SITE_SUFFIXES) + sfx_idx
-                if glob_idx >= len(tangents):
-                    continue
-                dx = tangents[glob_idx].to(device).float()
-                if dx.dim() == 3:
-                    dx = dx[0]
-
-                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
-                # Project: forward_jvp = dx @ w_enc (all features at once)
-                fwd_jvp = dx @ sae.w_enc  # [seq_len, d_sae]
-                nonzero = (fwd_jvp.abs() > 1e-8)
-                tok_idx, feat_idx = nonzero.nonzero(as_tuple=True)
-
-                if len(tok_idx) > 0:
-                    vals = fwd_jvp[tok_idx, feat_idx]
-                    for i in range(len(tok_idx)):
-                        rows.append({
-                            **base_meta, "layer": li, "token_pos": tok_idx[i].item(),
-                            "sae_type": st, "feature_id": feat_idx[i].item(),
-                            "steering_attribution": vals[i].item(),
-                        })
-                sae.to("cpu")
-                torch.cuda.empty_cache()
-
-    del tangents
+    del tangent_data
     torch.cuda.empty_cache()
 
     # Save
