@@ -152,7 +152,7 @@ DARK_OCHRE = "#CC7D5E"
 # Fonts
 SERIF_FONT = "Tiempos Text"
 SANS_SERIF_FONT = "Styrene B LC"
-TEMP_FONT_DIR = "/mnt/notebooks/meg/fonts/"
+TEMP_FONT_DIR = ""
 SERIF_FONT_FALLBACKS = ["cmb10"]
 SANS_SERIF_FONT_FALLBACKS = [
     "Avenir",
