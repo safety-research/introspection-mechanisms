@@ -9,13 +9,13 @@ Code for the paper *"Mechanisms of Introspective Awareness"*.
 
 We investigate the mechanisms underlying introspective awareness in large language models — the ability to detect and identify concepts injected into their residual stream via steering vectors. Our main findings:
 
-1. **Introspection is behaviorally robust.** Detection maintains 0% false positives across diverse prompts while achieving moderate true positive rates. The capability emerges from post-training.
+1. **Introspection is behaviorally robust.** Models detect injected steering vectors at modest nonzero rates, with 0% false positives, across diverse prompts and dialogue formats. The capability is absent in base models, and emerges from post-training; specifically, we find that it arises from contrastive preference optimization (DPO), but not supervised finetuning (SFT). The capability is strongest when the model acts in its trained assistant persona.
 
-2. **Anomaly detection is not reducible to a single linear direction.** Both the mean-difference direction and the residual carry detection-relevant signal, and bidirectional steering produces detection in both directions for success concept pairs.
+2. **Anomaly detection is not reducible to a single linear direction.** Although one direction in activation space explains a substantial fraction of detection variance, the underlying computation is distributed across multiple directions. This suggests that the capability is not explained by some concept vectors being correlated with a direction that promotes affirmative responses to questions in general.
 
-3. **Distinct detection and identification mechanisms.** MLPs at ~70% depth are causally necessary and sufficient for detection. Circuit analysis identifies evidence carrier and gate features that combine signals into a detection decision.
+3. **Distinct detection and identification mechanisms.** Detection and identification are handled by distinct mechanisms in different layers, with MLPs at ~70% depth causally necessary and sufficient for detection. Circuit analysis identifies "gate" features which inhibit detection claims, and which are suppressed by upstream "evidence carrier" features sensitive to injected steering vectors. Different steering vectors activate different evidence carriers, but the circuit converges on a common set of gates.
 
-4. **Models possess latent introspective capacity.** Ablating refusal directions improves detection by ~53pp; a trained steering vector improves detection by ~75pp on held-out concepts without increasing false positives.
+4. **Models possess underelicited introspective capacity.** Ablating refusal directions improves detection from 10.8% to 63.8% with modest false positive increases (0% to 7.3%). A trained bias vector improves detection by +75% and introspection by +55% on held-out concepts without increasing false positives.
 
 ## Repository Structure
 
