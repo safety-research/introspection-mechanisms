@@ -400,35 +400,57 @@ class TestActivationHooks:
 # Integration: select_top_features
 # =============================================================================
 
-class TestSelectTopFeatures:
-    def test_select_from_isa_parquets(self):
-        """End-to-end: create ISA parquets, select top features."""
+class TestEdgeWeightComputation:
+    def test_compute_edge_weights_from_sa_parquets(self):
+        """End-to-end: create SA parquets at multiple strengths, compute edge weights."""
         with tempfile.TemporaryDirectory() as tmpdir:
             sa_dir = Path(tmpdir)
 
-            # Create ISA data
-            rows = []
-            for layer in [38, 39, 45, 50]:
-                for st in ["transcoder_all", "attn_out_all", "mlp_out_all"]:
-                    for fid in range(20):
-                        isa_val = np.random.exponential(0.01)
-                        if layer == 45 and st == "transcoder_all" and fid < 3:
-                            isa_val = 1.0 + fid * 0.5  # Make these clearly the top
-                        rows.append({
-                            "layer": layer, "sae_type": st, "feature_id": fid,
-                            "token_pos": 140, "integrated_steering_attribution": isa_val,
-                            "trial_num": 1,
-                        })
+            # Create SA parquets at 3 strengths
+            for s, scale in [(0.0, 0.0), (2.0, 0.5), (4.0, 1.0)]:
+                s_int, s_frac = int(s), int((s % 1) * 100)
+                d = sa_dir / f"strength_{s_int}_{s_frac:02d}"
+                d.mkdir(parents=True)
+                rows = []
+                for layer in [38, 45]:
+                    for st in ["transcoder_all", "attn_out_all"]:
+                        for fid in range(5):
+                            sa_val = scale * (1.0 if layer == 45 and st == "transcoder_all" and fid == 0 else 0.01)
+                            rows.append({
+                                "layer": layer, "sae_type": st, "feature_id": fid,
+                                "token_pos": 140, "steering_attribution": sa_val,
+                                "gradient_attribution": 0.1, "steering_grad": 0.1,
+                            })
+                pd.DataFrame(rows).to_parquet(d / "sa_trial1.parquet", index=False)
 
-            pd.DataFrame(rows).to_parquet(sa_dir / "isa_trial1.parquet", index=False)
+            ew = mod.compute_edge_weights(sa_dir, [1], optimal_strength=4.0)
+            assert ew is not None
+            assert len(ew) > 0
+            # The (45, transcoder_all, 0, 140) feature should have the highest edge weight
+            top_key = max(ew, key=lambda k: ew[k])
+            assert top_key[0] == 45
+            assert top_key[1] == "transcoder_all"
+            assert top_key[2] == 0
 
-            features = mod.select_top_features(sa_dir, injection_layer=37, trial_nums=[1],
-                                                max_per_type=3, frac_of_max=0.10)
-            assert len(features) > 0
-            # Top feature should be from L45 TC
-            assert features[0].layer == 45
-            assert features[0].sae_type == "transcoder_all"
-            assert features[0].hop == 0
+    def test_select_features_from_edge_weights(self):
+        """Per-type selection should respect cap and threshold."""
+        ew = {
+            (45, "transcoder_all", 0, 140): 1.0,
+            (45, "transcoder_all", 1, 140): 0.5,
+            (45, "transcoder_all", 2, 140): 0.05,  # Below 10% of max
+            (50, "attn_out_all", 10, 140): 0.8,
+        }
+        selected = mod.select_features_from_edge_weights(ew, max_per_type=2, frac_of_max=0.10, injection_layer=37)
+        # TC: 1.0, 0.5 pass (0.05 below threshold); ATTN: 0.8
+        assert len(selected) == 3
+
+    def test_per_hop_max_per_type(self):
+        """_get_from_list should return correct per-hop cap."""
+        lst = [8, 5, 3, 2]
+        assert mod._get_from_list(lst, 0) == 8
+        assert mod._get_from_list(lst, 1) == 5
+        assert mod._get_from_list(lst, 3) == 2
+        assert mod._get_from_list(lst, 10) == 2  # Beyond list, use last
 
 
 if __name__ == "__main__":

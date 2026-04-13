@@ -77,10 +77,10 @@ warnings.filterwarnings("ignore", message="Glyph .* missing from font")
 DEFAULT_MODEL = "gemma3_27b"
 DEFAULT_LAYER = 37
 DEFAULT_STRENGTH = 4.0
-DEFAULT_N_STRENGTHS = 25
+DEFAULT_N_STRENGTHS = 21
 DEFAULT_STRENGTH_MAX = 8.0
 DEFAULT_TRACE_DEPTH = 2
-DEFAULT_MAX_PER_TYPE = 8
+DEFAULT_MAX_PER_TYPE = [8, 5, 3, 2]  # Per-hop: progressively narrower
 DEFAULT_FRAC_OF_MAX = 0.10
 DEFAULT_TOKEN_POS = -1
 DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
@@ -88,9 +88,22 @@ DEFAULT_OUTPUT_DIR = "analysis/exp62_attribution_graph"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_SEED = 42
+DEFAULT_SAE_WIDTH = "262k"
+DEFAULT_SAE_L0 = "big"
+DEFAULT_DIRECTION = "both"  # backward, forward, or both
 
 # SAE types to analyze
 SAE_TYPES = ["resid_post_all", "mlp_out_all", "attn_out_all", "transcoder_all"]
+
+# Only trace ATTN+TC features to next hop (MLP/RESID redundant with TC/ATTN)
+TRACE_SAE_TYPES = {"attn_out_all", "transcoder_all"}
+
+
+def _get_from_list(lst: List[int], hop: int) -> int:
+    """Get value for a given hop from a per-hop list. Uses last value if hop exceeds length."""
+    if hop < len(lst):
+        return lst[hop]
+    return lst[-1]
 
 # Maps display SAE type to (encoder_input_suffix, grad_target_suffix)
 # For transcoders: encode from pre_feedforward input, but GA target is post_feedforward output
@@ -863,8 +876,8 @@ def _extract_sa_core(
     injection_layer: int,
     strength: float,
     trial_num: int = 1,
-    sae_width: str = "16k",
-    sae_l0: str = "small",
+    sae_width: str = DEFAULT_SAE_WIDTH,
+    sae_l0: str = DEFAULT_SAE_L0,
     device: str = "cuda",
     # ── What differs between root-loss and feature-targeted modes ──
     target: Optional[Dict] = None,
@@ -1184,8 +1197,8 @@ def extract_steering_attribution(
     trial_num: int = 1,
     pos_token_id: int = 12932,
     neg_token_id: int = 3771,
-    sae_width: str = "16k",
-    sae_l0: str = "small",
+    sae_width: str = DEFAULT_SAE_WIDTH,
+    sae_l0: str = DEFAULT_SAE_L0,
     device: str = "cuda",
 ) -> Optional[Path]:
     """Extract SA for all SAE features at one injection strength (root logit-gap loss).
@@ -1222,8 +1235,8 @@ def extract_feature_target_sa(
     target_token_pos: int,
     output_dir: Path,
     trial_num: int = 1,
-    sae_width: str = "16k",
-    sae_l0: str = "small",
+    sae_width: str = DEFAULT_SAE_WIDTH,
+    sae_l0: str = DEFAULT_SAE_L0,
     device: str = "cuda",
 ) -> Optional[Path]:
     """Extract feature-targeted SA (loss = target feature activation).
@@ -1315,22 +1328,20 @@ def compute_isa(sa_dir: Path, trial_nums: List[int] = None) -> None:
 
 
 # =============================================================================
-# Section B: Feature Selection
+# Section B: Edge Weight Computation (GA-weighted integration)
 # =============================================================================
+
+SAE_ABBREV = {"transcoder_all": "TC", "attn_out_all": "ATTN",
+              "mlp_out_all": "MLP", "resid_post_all": "RESID"}
+
 
 def select_top_per_type(
     df, value_col: str, sae_type_col: str = "sae_type",
     max_per_type: int = 8, frac_of_max: float = 0.10,
 ):
-    """Per SAE type: select features with value > frac_of_max * type_max, capped at max_per_type.
-
-    This adapts to each type's scale without a global threshold. Only considers
-    positive values. Returns DataFrame sorted by value descending.
-    """
+    """Per SAE type: select features with value > frac_of_max * type_max, capped at max_per_type."""
     import pandas as pd
 
-    SAE_ABBREV = {"transcoder_all": "TC", "attn_out_all": "ATTN",
-                  "mlp_out_all": "MLP", "resid_post_all": "RESID"}
     pos = df[df[value_col] > 0]
     parts = []
     for st in sorted(pos[sae_type_col].unique()):
@@ -1338,92 +1349,30 @@ def select_top_per_type(
         if st_df.empty:
             continue
         max_val = st_df[value_col].iloc[0]
-        thresh = frac_of_max * max_val
-        above = st_df[st_df[value_col] > thresh]
+        above = st_df[st_df[value_col] > frac_of_max * max_val]
         selected = above.head(max_per_type)
         parts.append(selected)
-        abbrev = SAE_ABBREV.get(st, st)
-        print(f"    {abbrev}: {len(selected)} features "
+        print(f"    {SAE_ABBREV.get(st, st)}: {len(selected)} features "
               f"(>{frac_of_max:.0%} of max {max_val:.4f}, {len(above)} above, cap {max_per_type})")
     if not parts:
         return pos.iloc[:0]
     return pd.concat(parts).sort_values(value_col, ascending=False)
 
 
-def select_top_features(
-    sa_dir: Path,
-    injection_layer: int,
-    trial_nums: List[int],
-    max_per_type: int = DEFAULT_MAX_PER_TYPE,
-    frac_of_max: float = DEFAULT_FRAC_OF_MAX,
-) -> List[FeatureNode]:
-    """Select top features from ISA data using per-type frac-of-max threshold + cap."""
+def _load_curve_from_root_sa(
+    sa_dir: Path, trial_nums: List[int], target: FeatureNode, column: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load a feature's GA or SG curve across strengths from root SA parquets.
+
+    Args:
+        column: "gradient_attribution" for GA curve, "steering_grad" for SG curve.
+
+    Returns (strengths_array, values_array) sorted by strength. Empty if not found.
+    """
     import pandas as pd
 
-    dfs = []
-    for trial in trial_nums:
-        p = sa_dir / f"isa_trial{trial}.parquet"
-        if p.exists():
-            dfs.append(pd.read_parquet(p))
-    if not dfs:
-        raise FileNotFoundError(f"No ISA parquets in {sa_dir}")
-    df = pd.concat(dfs, ignore_index=True)
-    df = df[df["feature_id"] >= 0]
-    df = df[df["layer"] >= injection_layer]
-
-    grouped = df.groupby(["layer", "sae_type", "feature_id", "token_pos"]).agg(
-        isa_mean=("integrated_steering_attribution", "mean"),
-    ).reset_index()
-
-    top_df = select_top_per_type(grouped, "isa_mean", "sae_type", max_per_type, frac_of_max)
-    if top_df.empty:
-        print("  Warning: no features above threshold, taking top-10 by |ISA|")
-        top_df = grouped.reindex(grouped["isa_mean"].abs().sort_values(ascending=False).index).head(10)
-
-    # Filter resid to last layer only
-    last_layer = grouped["layer"].max()
-    top_df = top_df[~((top_df["sae_type"] == "resid_post_all") & (top_df["layer"] != last_layer))]
-
-    features = []
-    for _, row in top_df.iterrows():
-        features.append(FeatureNode(
-            layer=int(row["layer"]), sae_type=row["sae_type"],
-            feature_id=int(row["feature_id"]), token_pos=int(row["token_pos"]),
-            isa_value=float(row["isa_mean"]), hop=0,
-        ))
-    features.sort(key=lambda f: abs(f.isa_value), reverse=True)
-    print(f"  Selected {len(features)} features")
-    for f in features[:10]:
-        print(f"    {f.short_name()}: ISA={f.isa_value:.4f}")
-    return features
-
-
-# =============================================================================
-# Section B: Graph Construction
-# =============================================================================
-
-def select_upstream_features(
-    sa_dir: Path,
-    target: FeatureNode,
-    injection_layer: int,
-    trial_nums: List[int],
-    visited: Set[Tuple],
-    hop: int,
-    max_per_type: int = DEFAULT_MAX_PER_TYPE,
-    frac_of_max: float = DEFAULT_FRAC_OF_MAX,
-) -> Tuple[List[FeatureNode], List[FeatureEdge]]:
-    """Select upstream features from feature-targeted SA data."""
-    import pandas as pd
-
-    tgt_subdir = f"{target.sae_type}_L{target.layer}_F{target.feature_id}_T{target.token_pos}"
-    feat_sa_dir = sa_dir / "feat_sa" / tgt_subdir
-
-    if not feat_sa_dir.exists():
-        return [], []
-
-    # Load all strength dirs
-    feat_sa_by_strength: Dict[float, pd.DataFrame] = {}
-    for d in sorted(feat_sa_dir.iterdir()):
+    pairs = []
+    for d in sorted(sa_dir.iterdir()):
         if not d.is_dir():
             continue
         m = re.match(r"strength_(\d+)_(\d+)", d.name)
@@ -1431,63 +1380,325 @@ def select_upstream_features(
             continue
         s = float(f"{m.group(1)}.{m.group(2)}")
         for t in trial_nums:
-            f = d / f"feat_sa_trial{t}.parquet"
+            f = d / f"sa_trial{t}.parquet"
+            if not f.exists():
+                continue
+            df = pd.read_parquet(f, columns=["layer", "sae_type", "feature_id", "token_pos", column])
+            match = df[(df["layer"] == target.layer) & (df["sae_type"] == target.sae_type) &
+                       (df["feature_id"] == target.feature_id) & (df["token_pos"] == target.token_pos)]
+            if not match.empty:
+                pairs.append((s, float(match[column].iloc[0])))
+                break
+    if not pairs:
+        return np.array([]), np.array([])
+    pairs.sort()
+    return np.array([p[0] for p in pairs]), np.array([p[1] for p in pairs])
+
+
+def compute_edge_weights(
+    sa_dir: Path,
+    trial_nums: List[int],
+    optimal_strength: float,
+    target: Optional[FeatureNode] = None,
+    root_sa_dir: Optional[Path] = None,
+) -> Optional[Dict[Tuple, float]]:
+    """Compute GA-weighted edge weights using Simpson's rule.
+
+    For hop-0 (target=None): ew(f) = ∫₀^s* SA(f, α) dα  (GA_root = 1)
+    For hop-1+ (target=feature): ew(f→target) = ∫₀^s* GA_root(target, α) · SA(f→target, α) dα
+
+    Uses scipy.integrate.simpson for cubic interpolation accuracy.
+    """
+    import pandas as pd
+    from scipy.integrate import simpson
+
+    is_root = target is None
+
+    # Determine SA directory and parquet prefix
+    if is_root:
+        scan_dir = sa_dir
+        parquet_prefix = "sa_trial"
+    else:
+        tgt_subdir = f"{target.sae_type}_L{target.layer}_F{target.feature_id}_T{target.token_pos}"
+        scan_dir = sa_dir / "feat_sa" / tgt_subdir
+        parquet_prefix = "feat_sa_trial"
+
+    if not scan_dir.exists():
+        return None
+
+    # Load SA parquets at each strength
+    sa_by_strength: Dict[float, pd.DataFrame] = {}
+    for d in sorted(scan_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        m = re.match(r"strength_(\d+)_(\d+)", d.name)
+        if not m:
+            continue
+        s = float(f"{m.group(1)}.{m.group(2)}")
+        if s > optimal_strength + 0.1:
+            continue
+        for t in trial_nums:
+            f = d / f"{parquet_prefix}{t}.parquet"
             if f.exists():
-                feat_sa_by_strength[s] = pd.read_parquet(f)
+                sa_by_strength[s] = pd.read_parquet(f)
                 break
 
-    if len(feat_sa_by_strength) < 2:
-        return [], []
+    sorted_strengths = sorted(sa_by_strength.keys())
+    if len(sorted_strengths) < 2:
+        return None
 
-    sorted_strengths = sorted(feat_sa_by_strength.keys())
+    # Build SA matrix: pivot to (features × strengths)
+    KEY_COLS = ["layer", "sae_type", "feature_id", "token_pos"]
+    filtered = []
+    for s in sorted_strengths:
+        df_s = sa_by_strength[s].copy()
+        df_s = df_s[df_s["feature_id"] >= 0]
+        df_s["_strength"] = s
+        filtered.append(df_s[KEY_COLS + ["steering_attribution", "_strength"]])
 
-    # Build per-feature SA arrays
-    feat_sa_dict: Dict[Tuple, np.ndarray] = {}
-    first_df = feat_sa_by_strength[sorted_strengths[0]]
-    first_df = first_df[(first_df["feature_id"] >= 0) &
-                        (first_df["layer"] >= injection_layer) &
-                        (first_df["layer"] < target.layer)]
+    if not filtered:
+        return None
+    all_sa = pd.concat(filtered, ignore_index=True)
+    sa_wide = all_sa.pivot_table(
+        index=KEY_COLS, columns="_strength", values="steering_attribution",
+        aggfunc="first", fill_value=0.0,
+    )
+    sa_wide = sa_wide.reindex(columns=sorted_strengths, fill_value=0.0)
+    sa_matrix = sa_wide.values  # [n_features, n_strengths]
+    strengths_arr = np.array(sorted_strengths)
 
-    for _, row in first_df.iterrows():
+    # Load GA_root curve for target (hop-1+ only)
+    if not is_root and root_sa_dir is not None:
+        ga_strengths, ga_values = _load_curve_from_root_sa(
+            root_sa_dir, trial_nums, target, "gradient_attribution")
+        if len(ga_strengths) >= 2:
+            ga_interp = np.interp(sorted_strengths, ga_strengths, ga_values)
+        else:
+            ga_interp = np.ones(len(sorted_strengths))
+    else:
+        ga_interp = np.ones(len(sorted_strengths))
+
+    # GA-weighted integration with Simpson's rule (vectorized)
+    integrand = sa_matrix * ga_interp[np.newaxis, :]
+    edge_weights_arr = simpson(integrand, x=strengths_arr, axis=1)
+
+    # Build result dict
+    result: Dict[Tuple, float] = {}
+    for idx, (_, row) in enumerate(sa_wide.index.to_frame(index=False).iterrows()):
         key = (int(row["layer"]), row["sae_type"], int(row["feature_id"]), int(row["token_pos"]))
-        feat_sa_dict[key] = np.zeros(len(sorted_strengths))
+        result[key] = float(edge_weights_arr[idx])
 
-    for si, s in enumerate(sorted_strengths):
-        df_s = feat_sa_by_strength[s]
-        df_s = df_s[(df_s["feature_id"] >= 0) &
-                    (df_s["layer"] >= injection_layer) &
-                    (df_s["layer"] < target.layer)]
-        for _, row in df_s.iterrows():
-            key = (int(row["layer"]), row["sae_type"], int(row["feature_id"]), int(row["token_pos"]))
-            if key in feat_sa_dict:
-                feat_sa_dict[key][si] = float(row["steering_attribution"])
+    return result
 
-    # Integrate
-    s_arr = np.array(sorted_strengths)
-    weights = {}
-    for key, sa_arr in feat_sa_dict.items():
-        weights[key] = float(np.trapezoid(sa_arr, s_arr))
 
-    # IQR outlier selection
+def select_features_from_edge_weights(
+    edge_weights: Dict[Tuple, float],
+    max_per_type: int,
+    frac_of_max: float,
+    injection_layer: int,
+) -> List[Tuple[Tuple, float]]:
+    """Select top features from edge weights using per-type frac-of-max + cap."""
+    import pandas as pd
+
     records = [{"layer": k[0], "sae_type": k[1], "feature_id": k[2],
-                "token_pos": k[3], "weight": w} for k, w in weights.items()]
+                "token_pos": k[3], "edge_weight": w}
+               for k, w in edge_weights.items()
+               if k[0] >= injection_layer and k[2] >= 0]
     if not records:
-        return [], []
-    weight_df = pd.DataFrame(records)
-    outlier_df = select_top_per_type(weight_df, "weight", "sae_type", max_per_type, frac_of_max)
+        return []
+    df = pd.DataFrame(records)
+    # Filter resid to last layer only
+    last_layer = df["layer"].max()
+    df = df[~((df["sae_type"] == "resid_post_all") & (df["layer"] != last_layer))]
 
-    features, edges = [], []
-    for _, row in outlier_df.iterrows():
+    top_df = select_top_per_type(df, "edge_weight", "sae_type", max_per_type, frac_of_max)
+    result = []
+    for _, row in top_df.iterrows():
         key = (int(row["layer"]), row["sae_type"], int(row["feature_id"]), int(row["token_pos"]))
-        w = row["weight"]
-        edges.append(FeatureEdge(source_key=key, target_key=target.key, weight=w, hop=hop))
-        if key not in visited:
-            features.append(FeatureNode(
-                layer=key[0], sae_type=key[1], feature_id=key[2],
-                token_pos=key[3], isa_value=w, hop=hop,
-            ))
-    features.sort(key=lambda f: abs(f.isa_value), reverse=True)
-    return features, edges
+        result.append((key, float(row["edge_weight"])))
+    return result
+
+
+# =============================================================================
+# Section B: Graph Construction (backward + forward tracing)
+# =============================================================================
+
+def extract_forward_sa(
+    model_wrapper: ModelWrapper,
+    concept: str,
+    concept_vector: torch.Tensor,
+    injection_layer: int,
+    strength: float,
+    source_layer: int,
+    source_sae_type: str,
+    source_feature_id: int,
+    source_token_pos: int,
+    output_dir: Path,
+    trial_num: int = 1,
+    sae_width: str = DEFAULT_SAE_WIDTH,
+    sae_l0: str = DEFAULT_SAE_L0,
+    device: str = "cuda",
+) -> Optional[Path]:
+    """Forward SA: JVP from source feature's decoder direction → downstream features.
+
+    Perturbation tangent = w_dec[source_feature] at source_layer.
+    Captures how downstream features respond to activating the source.
+    The resulting SA is multiplied by GA_root (from root SA cache) during edge weight computation.
+    """
+    import pandas as pd
+
+    tokenizer = model_wrapper.tokenizer
+    inner = model_wrapper.model
+    messages = build_messages(trial_num)
+    prompt_str, input_ids, seq_len = format_prompt(messages, tokenizer)
+    input_ids = input_ids.to(device)
+    attention_mask = torch.ones_like(input_ids).to(device)
+    steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
+    n_layers = model_wrapper.n_layers
+    model_size = _model_name_to_sae_size(model_wrapper.model_name)
+    steering_vec = concept_vector.to(device).float()
+    layers_module = get_layers(inner)
+
+    # Load source SAE to get w_dec
+    src_load_type = SAE_TYPE_LOAD_MAP.get(source_sae_type, source_sae_type)
+    src_sae = load_sae(source_layer, sae_width, sae_l0, src_load_type, model_size, True, device)
+    source_dec_vec = src_sae.w_dec[source_feature_id].detach().clone().to(device).float()
+    src_sae.to("cpu")
+
+    # Preload downstream SAEs
+    sae_cache: Dict[Tuple[int, str], JumpReLUSAE] = {}
+    unique_types = set(SAE_TYPE_LOAD_MAP.get(st, st) for st in SAE_TYPES)
+    for li in range(source_layer + 1, n_layers):
+        for st in unique_types:
+            try:
+                sae = load_sae(li, sae_width, sae_l0, st, model_size, True, "cpu")
+                sae_cache[(li, st)] = sae.eval()
+            except Exception:
+                pass
+
+    def make_steering_hook(s):
+        def hook(module, input, output):
+            h = output[0] if isinstance(output, tuple) else output
+            rest = output[1:] if isinstance(output, tuple) else ()
+            addition = torch.zeros_like(h)
+            addition[:, steering_start:, :] = (steering_vec * s).unsqueeze(0)
+            return (h + addition,) + rest if isinstance(output, tuple) else h + addition
+        return hook
+
+    # Forward JVP: tangent = w_dec[source] at source layer
+    # Steering is applied at fixed strength (not differentiated)
+    t_primal = torch.tensor(0.0, dtype=torch.float32, device=device)
+    t_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # Determine where to add perturbation based on SAE type
+    in_suffix = SAE_TYPE_KEYS[source_sae_type][0]
+
+    def jvp_forward(t_val):
+        perturbation = source_dec_vec * t_val
+
+        # Steering hook (fixed strength)
+        steer_h = layers_module[injection_layer].register_forward_hook(
+            make_steering_hook(torch.tensor(strength, dtype=torch.float32, device=device)))
+
+        # Source perturbation hook
+        if source_sae_type == "attn_out_all":
+            src_module = layers_module[source_layer].self_attn.o_proj
+        elif source_sae_type in ("transcoder_all", "mlp_out_all"):
+            src_module = getattr(layers_module[source_layer], "post_feedforward_layernorm",
+                                 layers_module[source_layer])
+        else:
+            src_module = layers_module[source_layer]
+
+        def src_hook(module, input, output):
+            h = output[0] if isinstance(output, tuple) else output
+            rest = output[1:] if isinstance(output, tuple) else ()
+            p = perturbation.unsqueeze(0).unsqueeze(0).expand_as(h)
+            return (h + p,) + rest if isinstance(output, tuple) else h + p
+        src_h = src_module.register_forward_hook(src_hook)
+
+        act_hooks = ActivationHooks(inner, retain_grad=False)
+        act_hooks.register_hooks(list(range(source_layer + 1, n_layers)), CAPTURE_TYPES_SAE)
+        try:
+            with act_hooks:
+                inner.eval()
+                _ = inner(input_ids=input_ids, attention_mask=attention_mask,
+                          output_hidden_states=False, return_dict=True)
+        finally:
+            steer_h.remove()
+            src_h.remove()
+            act_hooks.remove_hooks()
+
+        raw = act_hooks.get_activations()
+        result = []
+        for li in range(source_layer + 1, n_layers):
+            for sfx in JVP_SITE_SUFFIXES:
+                ak = _act_key(li, sfx)
+                t = raw[ak][0] if ak in raw and raw[ak] else torch.zeros(1, device=device)
+                if isinstance(t, (list, tuple)):
+                    t = t[0]
+                result.append(t[0] if t.dim() == 3 else t)
+        return result
+
+    _, tangents = torch.func.jvp(jvp_forward, (t_primal,), (t_tangent,))
+
+    # Project tangents onto SAE encoder directions
+    rows: List[Dict] = []
+    base_meta = {
+        "concept": concept, "injection_layer": injection_layer,
+        "injection_strength": strength, "trial_num": trial_num,
+        "source_layer": source_layer, "source_sae_type": source_sae_type,
+        "source_feature_id": source_feature_id, "source_token_pos": source_token_pos,
+    }
+
+    with torch.no_grad():
+        tang_idx = 0
+        for li in range(source_layer + 1, n_layers):
+            for st in SAE_TYPES:
+                in_sfx = SAE_TYPE_KEYS[st][0]
+                lt = SAE_TYPE_LOAD_MAP.get(st, st)
+                if (li, lt) not in sae_cache:
+                    tang_idx += 1
+                    continue
+
+                # Find the tangent for this layer's input suffix
+                sfx_idx = JVP_SITE_SUFFIXES.index(in_sfx) if in_sfx in JVP_SITE_SUFFIXES else -1
+                if sfx_idx < 0:
+                    continue
+                glob_idx = (li - source_layer - 1) * len(JVP_SITE_SUFFIXES) + sfx_idx
+                if glob_idx >= len(tangents):
+                    continue
+                dx = tangents[glob_idx].to(device).float()
+                if dx.dim() == 3:
+                    dx = dx[0]
+
+                sae = sae_cache[(li, lt)].to(device=device, dtype=torch.float32).eval()
+                # Project: forward_jvp = dx @ w_enc (all features at once)
+                fwd_jvp = dx @ sae.w_enc  # [seq_len, d_sae]
+                nonzero = (fwd_jvp.abs() > 1e-8)
+                tok_idx, feat_idx = nonzero.nonzero(as_tuple=True)
+
+                if len(tok_idx) > 0:
+                    vals = fwd_jvp[tok_idx, feat_idx]
+                    for i in range(len(tok_idx)):
+                        rows.append({
+                            **base_meta, "layer": li, "token_pos": tok_idx[i].item(),
+                            "sae_type": st, "feature_id": feat_idx[i].item(),
+                            "steering_attribution": vals[i].item(),
+                        })
+                sae.to("cpu")
+                torch.cuda.empty_cache()
+
+    del tangents
+    torch.cuda.empty_cache()
+
+    # Save
+    src_subdir = f"fwd_{source_sae_type}_L{source_layer}_F{source_feature_id}_T{source_token_pos}"
+    s_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
+    out_path = output_dir / "feat_sa" / src_subdir / s_str / f"feat_sa_trial{trial_num}.parquet"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        pd.DataFrame(rows).to_parquet(out_path, index=False)
+    return out_path
 
 
 def build_attribution_graph(
@@ -1499,78 +1710,179 @@ def build_attribution_graph(
     output_dir: Path,
     trial_nums: List[int] = None,
     trace_depth: int = 2,
-    n_strengths_feat_sa: int = 11,
-    max_per_type: int = DEFAULT_MAX_PER_TYPE,
+    n_strengths_feat_sa: int = DEFAULT_N_STRENGTHS,
+    max_per_type: List[int] = None,
     frac_of_max: float = DEFAULT_FRAC_OF_MAX,
+    direction: str = DEFAULT_DIRECTION,
     device: str = "cuda",
 ) -> AttributionGraph:
-    """Build multi-hop attribution graph.
+    """Build multi-hop attribution graph with backward and/or forward tracing.
 
-    1. Select top features from ISA (hop 0 -> logit objective)
-    2. For each hop: extract feature-targeted SA, compute ISA, select upstream
-    3. Repeat for trace_depth hops
+    Algorithm (from CLAUDE.md):
+      For each hop:
+        1. Extract SA for all targets/sources (GPU)
+        2. Compute GA-weighted edge weights (∫GA×SA dα via Simpson's rule)
+        3. Per-type selection with per-hop max_per_type cap
+        4. Only ATTN+TC features traced to next hop
     """
     if trial_nums is None:
         trial_nums = [1]
+    if max_per_type is None:
+        max_per_type = DEFAULT_MAX_PER_TYPE
 
-    sa_dir = output_dir
+    root_sa_dir = output_dir  # Root SA parquets are in output_dir/strength_*/
 
-    # Select hop-0 features
-    print("\n  Selecting top features from ISA...")
-    hop0 = select_top_features(sa_dir, injection_layer, trial_nums, max_per_type, frac_of_max)
+    # ── Hop 0: compute edge weights from root SA ──
+    print("\n  Computing hop-0 edge weights (root → features)...")
+    hop0_ew = compute_edge_weights(root_sa_dir, trial_nums, optimal_strength)
+    if not hop0_ew:
+        print("  ERROR: No edge weights computed. Run extract-sa + compute-isa first.")
+        return AttributionGraph(nodes={}, edges=[], optimal_strength=optimal_strength)
+
+    mpt0 = _get_from_list(max_per_type, 0)
+    hop0_selected = select_features_from_edge_weights(hop0_ew, mpt0, frac_of_max, injection_layer)
 
     graph = AttributionGraph(nodes={}, edges=[], optimal_strength=optimal_strength)
     root = FeatureNode(layer=-1, sae_type="root", feature_id=-1, token_pos=-1, isa_value=0, hop=-1)
     graph.nodes[root.key] = root
 
-    visited: Set[Tuple] = set()
-    for feat in hop0:
-        graph.nodes[feat.key] = feat
-        visited.add(feat.key)
-        graph.edges.append(FeatureEdge(
-            source_key=feat.key, target_key=graph.root_key,
-            weight=feat.isa_value, hop=0,
-        ))
+    visited_bwd: Set[Tuple] = set()
+    visited_fwd: Set[Tuple] = set()
 
-    # Upstream tracing
+    for key, ew in hop0_selected:
+        node = FeatureNode(key[0], key[1], key[2], key[3], ew, hop=0)
+        graph.nodes[key] = node
+        visited_bwd.add(key)
+        visited_fwd.add(key)
+        graph.edges.append(FeatureEdge(source_key=key, target_key=graph.root_key, weight=ew, hop=0))
+
     feat_sa_strengths = np.linspace(0, optimal_strength, n_strengths_feat_sa).tolist()
-    current_targets = hop0
+    do_backward = direction in ("backward", "both")
+    do_forward = direction in ("forward", "both")
 
-    for hop in range(trace_depth):
-        if not current_targets:
-            break
-        print(f"\n  Hop {hop}: tracing {len(current_targets)} targets...")
+    # ── Backward tracing (hop-1+) ──
+    if do_backward:
+        # Select ATTN+TC trace targets
+        bwd_targets = [graph.nodes[k] for k, _ in hop0_selected
+                       if graph.nodes[k].sae_type in TRACE_SAE_TYPES
+                       and graph.nodes[k].feature_id >= 0
+                       and graph.nodes[k].layer > injection_layer]
 
-        # Extract feature-targeted SA for each target
-        for target in current_targets:
-            if target.layer <= injection_layer:
-                continue
-            print(f"    Extracting feat-target SA for {target.short_name()}...")
-            for s in tqdm(feat_sa_strengths, desc=f"    {target.short_name()}", leave=False):
-                extract_feature_target_sa(
-                    model_wrapper, concept, concept_vector,
-                    injection_layer, s,
-                    target.layer, target.sae_type, target.feature_id, target.token_pos,
-                    output_dir, trial_num=trial_nums[0], device=device,
-                )
+        for hop in range(trace_depth):
+            if not bwd_targets:
+                break
+            mpt = _get_from_list(max_per_type, hop + 1)
+            print(f"\n  Backward hop {hop+1}: tracing {len(bwd_targets)} targets (cap {mpt}/type)...")
 
-        # Select upstream features
-        next_targets = []
-        for target in current_targets:
-            if target.layer <= injection_layer:
-                continue
-            upstream, new_edges = select_upstream_features(
-                sa_dir, target, injection_layer, trial_nums,
-                visited, hop + 1, max_per_type, frac_of_max,
-            )
-            for feat in upstream:
-                graph.nodes[feat.key] = feat
-                visited.add(feat.key)
-                next_targets.append(feat)
-            graph.edges.extend(new_edges)
+            # Extract feature-targeted SA
+            for target in bwd_targets:
+                print(f"    {target.short_name()}...")
+                for s in tqdm(feat_sa_strengths, desc=f"    SA", leave=False):
+                    extract_feature_target_sa(
+                        model_wrapper, concept, concept_vector,
+                        injection_layer, s,
+                        target.layer, target.sae_type, target.feature_id, target.token_pos,
+                        output_dir, trial_num=trial_nums[0], device=device,
+                    )
 
-        current_targets = next_targets
-        print(f"  Hop {hop}: {len(next_targets)} new features discovered")
+            # Compute GA-weighted edge weights and select
+            next_targets = []
+            for target in bwd_targets:
+                ew = compute_edge_weights(
+                    output_dir, trial_nums, optimal_strength,
+                    target=target, root_sa_dir=root_sa_dir)
+                if not ew:
+                    continue
+                selected = select_features_from_edge_weights(ew, mpt, frac_of_max, injection_layer)
+                for key, w in selected:
+                    if key not in visited_bwd:
+                        node = FeatureNode(key[0], key[1], key[2], key[3], w, hop=hop+1)
+                        graph.nodes[key] = node
+                        visited_bwd.add(key)
+                        if node.sae_type in TRACE_SAE_TYPES and node.layer > injection_layer:
+                            next_targets.append(node)
+                    graph.edges.append(FeatureEdge(source_key=key, target_key=target.key, weight=w, hop=hop+1))
+
+            bwd_targets = next_targets
+            print(f"  Backward hop {hop+1}: {len(next_targets)} new features")
+
+    # ── Forward tracing (hop-1+) ──
+    if do_forward:
+        max_layer = model_wrapper.n_layers - 1
+        fwd_sources = [graph.nodes[k] for k, _ in hop0_selected
+                       if graph.nodes[k].sae_type in TRACE_SAE_TYPES
+                       and graph.nodes[k].feature_id >= 0
+                       and graph.nodes[k].layer < max_layer]
+
+        for hop in range(trace_depth):
+            if not fwd_sources:
+                break
+            mpt = _get_from_list(max_per_type, hop + 1)
+            print(f"\n  Forward hop {hop+1}: tracing {len(fwd_sources)} sources (cap {mpt}/type)...")
+
+            # Extract forward SA for each source
+            for source in fwd_sources:
+                print(f"    {source.short_name()}...")
+                for s in tqdm(feat_sa_strengths, desc=f"    fwd SA", leave=False):
+                    extract_forward_sa(
+                        model_wrapper, concept, concept_vector,
+                        injection_layer, s,
+                        source.layer, source.sae_type, source.feature_id, source.token_pos,
+                        output_dir, trial_num=trial_nums[0], device=device,
+                    )
+
+            # Compute SG-weighted edge weights (symmetric: use SG instead of GA)
+            next_sources = []
+            for source in fwd_sources:
+                # For forward: target subdir uses fwd_ prefix
+                src_subdir = f"fwd_{source.sae_type}_L{source.layer}_F{source.feature_id}_T{source.token_pos}"
+                scan_dir = output_dir / "feat_sa" / src_subdir
+                if not scan_dir.exists():
+                    continue
+
+                # Load SG curve for source from root SA
+                sg_strengths, sg_values = _load_curve_from_root_sa(
+                    root_sa_dir, trial_nums, source, "steering_grad")
+
+                # Compute edge weights with SG weighting
+                ew = compute_edge_weights(
+                    output_dir, trial_nums, optimal_strength,
+                    target=FeatureNode(source.layer, source.sae_type, source.feature_id,
+                                       source.token_pos, 0, 0),
+                    root_sa_dir=None)  # No GA weighting for forward; handled below
+
+                if not ew:
+                    continue
+                # Apply SG weighting (approximation: multiply by mean SG)
+                if len(sg_values) >= 2:
+                    sg_mean = float(np.mean(np.abs(sg_values)))
+                else:
+                    sg_mean = 1.0
+
+                selected = select_features_from_edge_weights(
+                    {k: v * sg_mean for k, v in ew.items()},
+                    mpt, frac_of_max, source.layer + 1)
+                for key, w in selected:
+                    if key not in visited_fwd:
+                        node = FeatureNode(key[0], key[1], key[2], key[3], w, hop=hop+1)
+                        if key not in graph.nodes:
+                            graph.nodes[key] = node
+                        visited_fwd.add(key)
+                        if node.sae_type in TRACE_SAE_TYPES and node.layer < max_layer:
+                            next_sources.append(node)
+                    graph.edges.append(FeatureEdge(
+                        source_key=source.key, target_key=key, weight=w, hop=hop+1))
+
+            fwd_sources = next_sources
+            print(f"  Forward hop {hop+1}: {len(next_sources)} new features")
+
+    # Dedup edges by (source, target) keeping max weight
+    seen_edges: Dict[Tuple, FeatureEdge] = {}
+    for e in graph.edges:
+        edge_key = (e.source_key, e.target_key)
+        if edge_key not in seen_edges or abs(e.weight) > abs(seen_edges[edge_key].weight):
+            seen_edges[edge_key] = e
+    graph.edges = list(seen_edges.values())
 
     print(f"\n  Graph complete: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
     return graph
@@ -1791,9 +2103,12 @@ def parse_args():
     p3 = subparsers.add_parser("build-graph", parents=[common], help="Build attribution graph")
     p3.add_argument("-s", "--strength", type=float, default=DEFAULT_STRENGTH, help="Optimal strength")
     p3.add_argument("--trace-depth", type=int, default=DEFAULT_TRACE_DEPTH)
-    p3.add_argument("--max-per-type", type=int, default=DEFAULT_MAX_PER_TYPE)
+    p3.add_argument("--max-per-type", type=int, nargs="+", default=DEFAULT_MAX_PER_TYPE,
+                     help="Per-hop max features per SAE type (e.g. 8 5 3 2)")
     p3.add_argument("--frac-of-max", type=float, default=DEFAULT_FRAC_OF_MAX)
-    p3.add_argument("--n-strengths-feat-sa", type=int, default=11)
+    p3.add_argument("--n-strengths-feat-sa", type=int, default=DEFAULT_N_STRENGTHS)
+    p3.add_argument("--direction", type=str, default=DEFAULT_DIRECTION,
+                     choices=["backward", "forward", "both"])
 
     # visualize
     p4 = subparsers.add_parser("visualize", parents=[common], help="Render existing graph")
@@ -1805,8 +2120,11 @@ def parse_args():
     p5.add_argument("--n-strengths", type=int, default=DEFAULT_N_STRENGTHS)
     p5.add_argument("--strength-max", type=float, default=DEFAULT_STRENGTH_MAX)
     p5.add_argument("--trace-depth", type=int, default=DEFAULT_TRACE_DEPTH)
-    p5.add_argument("--max-per-type", type=int, default=DEFAULT_MAX_PER_TYPE)
+    p5.add_argument("--max-per-type", type=int, nargs="+", default=DEFAULT_MAX_PER_TYPE,
+                     help="Per-hop max features per SAE type (e.g. 8 5 3 2)")
     p5.add_argument("--frac-of-max", type=float, default=DEFAULT_FRAC_OF_MAX)
+    p5.add_argument("--direction", type=str, default=DEFAULT_DIRECTION,
+                     choices=["backward", "forward", "both"])
     p5.add_argument("--n-strengths-feat-sa", type=int, default=11)
 
     return parser.parse_args()
@@ -1865,12 +2183,12 @@ def main():
         graph = build_attribution_graph(
             mw, concept, vectors[concept], layer, args.strength,
             base_out, [trial_num], args.trace_depth, args.n_strengths_feat_sa,
-            args.max_per_type, args.frac_of_max, args.device)
+            args.max_per_type, args.frac_of_max, args.direction, args.device)
         graph_dir = base_out / "graphs"
         graph_dir.mkdir(parents=True, exist_ok=True)
         export_graph_json(graph, graph_dir / "attribution_graph.json")
-        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         render_interactive(graph, graph_dir / "attribution_graph.html")
+        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         write_graph_summary(graph, graph_dir / "graph_summary.txt", concept, layer)
 
     elif args.phase == "visualize":
@@ -1922,15 +2240,15 @@ def main():
         graph = build_attribution_graph(
             mw, concept, vec, layer, args.strength, base_out,
             [trial_num], args.trace_depth, args.n_strengths_feat_sa,
-            args.max_per_type, args.frac_of_max, args.device)
+            args.max_per_type, args.frac_of_max, args.direction, args.device)
 
         # Step 4: Visualize
         print("\nStep 4: Visualization...")
         graph_dir = base_out / "graphs"
         graph_dir.mkdir(parents=True, exist_ok=True)
         export_graph_json(graph, graph_dir / "attribution_graph.json")
-        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         render_interactive(graph, graph_dir / "attribution_graph.html")
+        render_pdf_from_html(graph_dir / "attribution_graph.html", graph_dir / "attribution_graph.pdf")
         write_graph_summary(graph, graph_dir / "graph_summary.txt", concept, layer)
 
         print("\n" + "=" * 70)
