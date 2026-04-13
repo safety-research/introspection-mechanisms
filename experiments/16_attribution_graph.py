@@ -48,29 +48,24 @@ Usage:
 """
 
 import argparse
-import gc
 import json
 import re
 import sys
 import warnings
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from model_utils import ModelWrapper, load_model, MODEL_NAME_MAP
-from vector_utils import get_baseline_words
+from model_utils import ModelWrapper, load_model
 
 warnings.filterwarnings("ignore", message="Glyph .* missing from font")
 
@@ -661,6 +656,7 @@ def extract_steering_attribution(
                         })
 
                 # Per-token remainder SA
+                # remainder_SA[t] = (grad[t] . dx/dalpha[t]) - sum_f SA_f(t)
                 tkey = (li, in_suffix)
                 total = torch.zeros(seq_len, device=device)
                 if has_grad_path and tkey in tangent_data:
@@ -674,12 +670,49 @@ def extract_steering_attribution(
                     feat_sa_sum.scatter_add_(0, tok_idx, sa_vals)
                 rem_sa = total - feat_sa_sum
 
+                # Remainder diagnostics: norm, GA, SG
+                if tgt_suffix is not None:
+                    # Transcoder: remainder = target_act - recon
+                    recon_all = sae(x_all)
+                    if (li, "mlp_out_all") in act_data:
+                        target_all = act_data[(li, "mlp_out_all")].to(device)
+                    else:
+                        target_all = x_all
+                    remainder = target_all - recon_all
+                else:
+                    remainder = x_all - sae.decode(sae_acts)
+
+                rem_norm = remainder.norm(dim=-1)  # [seq_len]
+
+                # GA_rem = (dL/dx_t) . (rem_t / ||rem_t||)
+                safe_norm = rem_norm.clamp(min=1e-10).unsqueeze(-1)
+                rem_ga = (grad_tensor * (remainder / safe_norm)).sum(dim=-1)
+
+                # SG_rem = ||drem/dalpha|| = ||dx/dalpha - sum_f SG_f * w_dec_f||
+                rem_sg = torch.zeros(seq_len, device=device)
+                if has_grad_path and tkey in tangent_data:
+                    dx_rem = tangent_data[tkey].to(device).float()
+                    if dx_rem.dim() == 3:
+                        dx_rem = dx_rem[0]
+                    drecon_dalpha = torch.zeros_like(dx_rem)
+                    if n_active > 0:
+                        contrib = sg_vals.unsqueeze(-1) * sae.w_dec[feat_idx]
+                        drecon_dalpha.index_add_(0, tok_idx, contrib)
+                    drem_dalpha = dx_rem - drecon_dalpha
+                    rem_sg = drem_dalpha.norm(dim=-1)
+
+                rem_sa_list = rem_sa.cpu().tolist()
+                rem_norm_list = rem_norm.cpu().tolist()
+                rem_ga_list = rem_ga.cpu().tolist()
+                rem_sg_list = rem_sg.cpu().tolist()
                 for t in range(seq_len):
                     feature_rows.append({
                         **base_meta, "layer": li, "token_pos": t,
                         "sae_type": st, "feature_id": -1,
-                        "activation": 0.0, "gradient_attribution": 0.0,
-                        "steering_grad": 0.0, "steering_attribution": rem_sa[t].item(),
+                        "activation": rem_norm_list[t],
+                        "gradient_attribution": rem_ga_list[t],
+                        "steering_grad": rem_sg_list[t],
+                        "steering_attribution": rem_sa_list[t],
                     })
 
                 sae.to("cpu")
@@ -727,7 +760,6 @@ def extract_feature_target_sa(
     input_ids = input_ids.to(device)
     attention_mask = torch.ones_like(input_ids).to(device)
     steering_start = find_steering_start(tokenizer, prompt_str, trial_num)
-    n_layers = model_wrapper.n_layers
     model_size = _model_name_to_sae_size(model_wrapper.model_name)
     steering_vec = concept_vector.to(device).float()
     layers_module = get_layers(inner)
@@ -1445,7 +1477,7 @@ def parse_args():
     p1.add_argument("-s", "--strength", type=float, default=DEFAULT_STRENGTH)
 
     # compute-isa
-    p2 = subparsers.add_parser("compute-isa", parents=[common], help="Compute ISA from SA data")
+    subparsers.add_parser("compute-isa", parents=[common], help="Compute ISA from SA data")
 
     # build-graph
     p3 = subparsers.add_parser("build-graph", parents=[common], help="Build attribution graph")
