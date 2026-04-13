@@ -46,6 +46,7 @@ We investigate the mechanisms underlying introspective awareness in large langua
 │   ├── 04h_aggregation_analysis.py       # Verbalizability + ridge R² on transcoder features (§4.3)
 │   ├── 04i_alternative_geometric_tests.py # Cone rotation test, norm/unembedding hypotheses (Appendix H)
 │   ├── 05_negative_steering.py           # Negative direction steering
+│   ├── concepts_list.py                  # 450 additional concepts for 500-concept sweep
 │   ├── steering_prompts.py               # Prompt definitions for steering experiments
 │   ├── refusal_prompts.py                # Harmful/harmless prompt datasets for abliteration
 │   ├── 06_activation_patching.py         # Per-layer activation patching (§5.2)
