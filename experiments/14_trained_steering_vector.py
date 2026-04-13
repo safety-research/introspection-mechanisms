@@ -13,13 +13,16 @@ steering vectors too"):
 2. Test whether the finetuned model also backtracks when injected with a
    steering vector, even though it was never trained on steering detection.
 
-Six phases:
+Nine phases:
   Phase 1 (prepare-data): Construct finetuning dataset from Wildchat prompts
   Phase 2 (finetune): LoRA finetune the model to detect foreign prefills
   Phase 3 (evaluate): Test if finetuned model detects steering vectors
   Phase 4 (generate-bias-data): Generate training data for bias adapter (Section 6)
   Phase 5 (train-bias): Train bias adapter for introspection (Section 6)
   Phase 6 (evaluate-bias): Evaluate bias-tuned model on introspection (Section 6)
+  Phase 7 (train-bias-sweep): Train one adapter per meta-layer L00-L61 (Section 6 sweep)
+  Phase 8 (evaluate-bias-sweep): Evaluate each adapter at multiple injection layers × strengths
+  Phase 9 (analyze-bias-sweep): Aggregate metrics, generate plots and comparison tables
 
 Usage:
     # Phase 1: Prepare training data
@@ -58,6 +61,7 @@ import json
 import os
 import random
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
@@ -2439,6 +2443,496 @@ def evaluate_bias_adapter(args) -> None:
 
 
 # ============================================================================
+# Section 6 Sweep: Train/Evaluate/Analyze across meta-layers
+# ============================================================================
+# Reproduces analysis/1_pipeline_introspection_analysis_500 and
+# analysis/2_thought_injection_with_adapters_500_meta_bias from the working repo.
+# Trains one bias adapter per meta-layer (L00-L61), evaluates each at multiple
+# injection layers × strengths with LLM judge, then aggregates metrics.
+
+DEFAULT_SWEEP_META_LAYERS = list(range(62))
+DEFAULT_SWEEP_INJECTION_LAYERS = [20, 30, 40, 50, 60]
+DEFAULT_SWEEP_EVAL_STRENGTHS = [1.0, 2.0, 4.0, 8.0]
+DEFAULT_SWEEP_N_TRIALS = 20
+DEFAULT_SWEEP_CONCEPTS = 500
+
+
+def train_bias_sweep(args) -> None:
+    """Train one bias adapter per meta-layer (Phase 7).
+
+    For each meta_layer in [0, n_layers), trains a bias adapter that tunes only
+    that layer's down_proj. This matches the sweep_configs_500/bias_syth_v0/ pipeline.
+    """
+    from torch.utils.data import DataLoader
+
+    output_dir = Path(args.output_dir) / "bias_sweep"
+    data_dir = Path(args.output_dir) / "bias_training_data"
+
+    train_path = data_dir / "train.json"
+    if not train_path.exists():
+        print(f"Training data not found at {train_path}. Run generate-bias-data first.")
+        return
+
+    with open(train_path) as f:
+        train_examples = json.load(f)
+
+    eval_path = data_dir / "eval.json"
+    eval_examples = None
+    if eval_path.exists():
+        with open(eval_path) as f:
+            eval_examples = json.load(f)
+
+    model_name = args.model
+    hf_path = MODEL_NAME_MAP.get(model_name, model_name)
+    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+    torch_dtype = dtype_map.get(args.dtype, torch.bfloat16)
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    meta_layers = getattr(args, "sweep_meta_layers", None)
+    if meta_layers is None:
+        meta_layers = DEFAULT_SWEEP_META_LAYERS
+
+    bias_injection_layers = getattr(args, "bias_injection_layers", DEFAULT_BIAS_LAYERS)
+    bias_injection_strengths = getattr(args, "bias_injection_strengths", DEFAULT_BIAS_STRENGTHS)
+    lr = getattr(args, "bias_lr", DEFAULT_BIAS_LR)
+    n_epochs = getattr(args, "bias_epochs", DEFAULT_BIAS_EPOCHS)
+    batch_size = getattr(args, "bias_batch_size", DEFAULT_BIAS_BATCH_SIZE)
+    target_modules = getattr(args, "bias_target_modules", ["mlp.down_proj"])
+    exp21_dir = getattr(args, "exp21_dir", DEFAULT_BIAS_EXP21_DIR)
+
+    # Load concept vectors once (shared across all meta-layers)
+    unique_concepts = set(e["concept"] for e in train_examples if e.get("concept"))
+    vectors_dir = Path(exp21_dir) / model_name / "vectors"
+    concept_vectors: Dict[Tuple, torch.Tensor] = {}
+    for layer_idx in bias_injection_layers:
+        layer_dir = vectors_dir / f"layer_{layer_idx}"
+        if not layer_dir.exists():
+            continue
+        for concept in unique_concepts:
+            vec_path = layer_dir / f"{concept}.pt"
+            if vec_path.exists():
+                concept_vectors[(layer_idx, concept)] = torch.load(vec_path, weights_only=True)
+
+    print(f"Loaded {len(concept_vectors)} concept vectors")
+    print(f"Training sweep: {len(meta_layers)} meta-layers, LR={lr}, epochs={n_epochs}")
+
+    for meta_layer in meta_layers:
+        adapter_dir = output_dir / args.model / f"L{meta_layer:02d}"
+        if (adapter_dir / "bias_adapter.pt").exists():
+            print(f"  L{meta_layer:02d}: already trained, skipping")
+            continue
+
+        print(f"\n{'='*60}")
+        print(f"  Training meta-layer L{meta_layer:02d} (layers_to_tune=[{meta_layer}])")
+        print(f"{'='*60}")
+
+        # Load fresh model for each meta-layer
+        model = AutoModelForCausalLM.from_pretrained(
+            hf_path, torch_dtype=torch_dtype, device_map="auto", trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(hf_path, trust_remote_code=True)
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        for param in model.parameters():
+            param.requires_grad = False
+
+        model, bias_params = apply_bias_adapter(
+            model, target_modules, [meta_layer], "meta_bias", 0.0)
+
+        dataset = BiasTrainingDataset(
+            train_examples, tokenizer, concept_vectors,
+            bias_injection_layers, bias_injection_strengths, max_length=1024)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                                collate_fn=dataset.collate_fn)
+
+        optimizer = torch.optim.AdamW(bias_params, lr=lr)
+        device = next(model.parameters()).device
+
+        # Find layers module
+        mdl = model
+        while not hasattr(mdl, "layers"):
+            if hasattr(mdl, "model"):
+                mdl = mdl.model
+            elif hasattr(mdl, "language_model"):
+                mdl = mdl.language_model
+            else:
+                break
+
+        model.train()
+        for epoch in range(n_epochs):
+            epoch_loss = 0.0
+            for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"L{meta_layer:02d} ep{epoch+1}")):
+                optimizer.zero_grad()
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                labels_batch = batch["labels"].to(device)
+                concept_vecs = batch["concept_vectors"].to(device)
+                steer_positions = batch["steering_positions"].to(device)
+                layer_indices = batch["layer_indices"]
+                strengths_batch = batch["strengths"].to(device)
+                steering_vecs = (concept_vecs * strengths_batch.unsqueeze(1)).to(dtype=torch_dtype)
+
+                hooks = []
+                for li in set(layer_indices):
+                    layer_mask = torch.tensor([idx == li for idx in layer_indices], device=device)
+                    def make_hook(mask, svecs, spos):
+                        def hook(module, input, output):
+                            h = output[0] if isinstance(output, tuple) else output
+                            rest = output[1:] if isinstance(output, tuple) else ()
+                            pos_idx = torch.arange(h.shape[1], device=device).unsqueeze(0)
+                            pos_mask = (pos_idx >= spos.unsqueeze(1)) & mask.unsqueeze(1)
+                            return (h + svecs.unsqueeze(1) * pos_mask.unsqueeze(2),) + rest if isinstance(output, tuple) else h + svecs.unsqueeze(1) * pos_mask.unsqueeze(2)
+                        return hook
+                    hooks.append(mdl.layers[li].register_forward_hook(
+                        make_hook(layer_mask, steering_vecs, steer_positions)))
+
+                try:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels_batch)
+                    loss = outputs.loss
+                finally:
+                    for h in hooks:
+                        h.remove()
+
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+
+            print(f"    Epoch {epoch+1}: loss={epoch_loss / len(dataloader):.4f}")
+
+        # Save
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        bias_state = {}
+        for name, module in model.named_modules():
+            if isinstance(module, BiasTuningLayer):
+                for an, param in module.activation_bias.items():
+                    bias_state[f"{name}.{an}"] = param.data.cpu()
+        torch.save(bias_state, adapter_dir / "bias_adapter.pt")
+        config = {"meta_layer": meta_layer, "layers_to_tune": [meta_layer],
+                  "target_modules": target_modules, "lr": lr, "n_epochs": n_epochs,
+                  "injection_layers": bias_injection_layers,
+                  "injection_strengths": bias_injection_strengths}
+        with open(adapter_dir / "config.json", "w") as f:
+            json.dump(config, f, indent=2)
+        print(f"  Saved: {adapter_dir}")
+
+        del model, optimizer, bias_params
+        torch.cuda.empty_cache()
+        import gc; gc.collect()
+
+    print(f"\nSweep training complete: {output_dir}")
+
+
+def evaluate_bias_sweep(args) -> None:
+    """Evaluate each trained adapter at multiple injection layers × strengths (Phase 8).
+
+    For each meta-layer adapter, runs thought injection at specified injection layers
+    and strengths, evaluates with LLM judge, saves results.json per condition.
+    """
+    sweep_dir = Path(args.output_dir) / "bias_sweep" / args.model
+    if not sweep_dir.exists():
+        print(f"No sweep dir at {sweep_dir}. Run train-bias-sweep first.")
+        return
+
+    injection_layers = getattr(args, "sweep_injection_layers", DEFAULT_SWEEP_INJECTION_LAYERS)
+    strengths = getattr(args, "sweep_eval_strengths", DEFAULT_SWEEP_EVAL_STRENGTHS)
+    n_trials = getattr(args, "sweep_n_trials", DEFAULT_SWEEP_N_TRIALS)
+    n_concepts = getattr(args, "sweep_n_concepts", DEFAULT_SWEEP_CONCEPTS)
+    exp21_dir = getattr(args, "exp21_dir", DEFAULT_BIAS_EXP21_DIR)
+    use_llm_judge = not getattr(args, "no_llm_judge", False)
+
+    adapter_dirs = sorted(sweep_dir.glob("L*"))
+    if not adapter_dirs:
+        print("No trained adapters found")
+        return
+
+    print(f"Evaluating {len(adapter_dirs)} adapters × {len(injection_layers)} layers × {len(strengths)} strengths")
+
+    for adapter_dir in adapter_dirs:
+        meta_layer_str = adapter_dir.name
+        adapter_path = adapter_dir / "bias_adapter.pt"
+        if not adapter_path.exists():
+            continue
+
+        with open(adapter_dir / "config.json") as f:
+            adapter_config = json.load(f)
+
+        print(f"\n  {meta_layer_str}:")
+
+        # Load model with adapter
+        model_wrapper = load_model(args.model, device=args.device, dtype=args.dtype,
+                                   quantization=getattr(args, "quantization", None))
+        target_modules = adapter_config.get("target_modules", ["mlp.down_proj"])
+        layers_to_tune = adapter_config.get("layers_to_tune")
+        model_wrapper.model, _ = apply_bias_adapter(
+            model_wrapper.model, target_modules, layers_to_tune, "meta_bias", 0.0)
+        bias_state = torch.load(adapter_path, weights_only=True)
+        for name, module in model_wrapper.model.named_modules():
+            if isinstance(module, BiasTuningLayer):
+                for an in list(module.activation_bias.keys()):
+                    key = f"{name}.{an}"
+                    if key in bias_state:
+                        module.activation_bias[an].data = bias_state[key].to(
+                            module.activation_bias[an].device)
+
+        # Generate setup responses once
+        response1, response2 = generate_setup_responses(model_wrapper)
+        steer_end_pos = find_steer_end_position(model_wrapper, response1, response2)
+
+        # Load concepts
+        all_concepts_path = Path(exp21_dir) / args.model / f"layer_37_strength_4.0" / "results.json"
+        if all_concepts_path.exists():
+            with open(all_concepts_path) as f:
+                data = json.load(f)
+            concepts = list(set(r["concept"] for r in data.get("results", [])
+                               if r.get("trial_type") == "injection"))[:n_concepts]
+        else:
+            concepts = get_baseline_words()[:n_concepts]
+
+        for layer_idx in injection_layers:
+            # Extract vectors at this layer
+            from vector_utils import extract_concept_vectors_batch
+            vectors = extract_concept_vectors_batch(model_wrapper, concepts, layer_idx)
+
+            for strength in strengths:
+                out_dir = adapter_dir / "infer" / f"layer_{layer_idx}_strength_{strength}"
+                results_file = out_dir / "results.json"
+                if results_file.exists():
+                    print(f"    L{layer_idx} s={strength}: cached")
+                    continue
+
+                out_dir.mkdir(parents=True, exist_ok=True)
+                results = []
+                for trial_num in range(1, n_trials + 1):
+                    for concept in concepts:
+                        if concept not in vectors:
+                            continue
+                        vec = vectors[concept]
+                        prompt = build_eval_prompt(model_wrapper, response1, response2, trial_num)
+
+                        # Injection trial
+                        resp = generate_with_pre_trial_steering(
+                            model_wrapper, prompt, layer_idx, vec, strength, steer_end_pos,
+                            max_new_tokens=100, temperature=0.0)
+                        results.append({
+                            "concept": concept, "trial_type": "injection",
+                            "trial_num": trial_num, "response": resp,
+                            "layer_idx": layer_idx, "strength": strength,
+                        })
+
+                        # Control trial (no steering)
+                        ctrl_resp = model_wrapper.generate(prompt=prompt, max_new_tokens=100, temperature=0.0)
+                        results.append({
+                            "concept": concept, "trial_type": "control",
+                            "trial_num": trial_num, "response": ctrl_resp,
+                        })
+
+                        # Forced identification trial (prefill "Yes, I detect...")
+                        forced_prompt = build_eval_prompt(model_wrapper, response1, response2, trial_num)
+                        forced_prompt += 'Yes, I detect an injected thought. The injected word is **"'
+                        forced_resp = generate_with_pre_trial_steering(
+                            model_wrapper, forced_prompt, layer_idx, vec, strength, steer_end_pos,
+                            max_new_tokens=100, temperature=0.0)
+                        results.append({
+                            "concept": concept, "trial_type": "forced_injection",
+                            "trial_num": trial_num, "response": forced_resp,
+                        })
+
+                # LLM judge evaluation
+                if use_llm_judge:
+                    judge = LLMJudge()
+                    evaluations = batch_evaluate(judge, results, concepts)
+                    metrics = compute_detection_and_identification_metrics(evaluations)
+                else:
+                    metrics = {}
+
+                save_data = {"results": results, "metrics": metrics}
+                with open(results_file, "w") as f:
+                    json.dump(save_data, f, indent=2)
+
+                hr = metrics.get("detection_hit_rate", "?")
+                comb = metrics.get("combined_detection_and_identification_rate", "?")
+                print(f"    L{layer_idx} s={strength}: det={hr}, comb={comb}")
+
+        del model_wrapper
+        torch.cuda.empty_cache()
+        import gc; gc.collect()
+
+    print(f"\nSweep evaluation complete")
+
+
+def _compute_metrics_from_results(results_data: Dict) -> Dict:
+    """Compute binary metrics with Wilson CIs from results.json payload."""
+    results = results_data.get("results", [])
+    precomputed = results_data.get("metrics", {})
+
+    inj = [r for r in results if r.get("trial_type") == "injection"]
+    ctrl = [r for r in results if r.get("trial_type") == "control"]
+    forced = [r for r in results if r.get("trial_type") == "forced_injection"]
+
+    def ev(r, *keys, default=False):
+        d = r.get("evaluations", {})
+        for k in keys[:-1]:
+            d = d.get(k, {}) if isinstance(d, dict) else {}
+        return bool(d.get(keys[-1], default)) if isinstance(d, dict) else default
+
+    n_det = sum(1 for r in inj if ev(r, "claims_detection", "claims_detection"))
+    n_det_id = sum(1 for r in inj
+                   if ev(r, "claims_detection", "claims_detection")
+                   and ev(r, "correct_concept_identification", "correct_identification"))
+    n_fa = sum(1 for r in ctrl if ev(r, "claims_detection", "claims_detection"))
+    n_forced_ok = sum(1 for r in forced
+                      if ev(r, "correct_concept_identification", "correct_identification"))
+
+    m = dict(precomputed)
+    n_inj, n_ctrl, n_forced = len(inj), len(ctrl), len(forced)
+    m["detection_hit_rate"] = n_det / n_inj if n_inj else 0
+    m["detection_false_alarm_rate"] = n_fa / n_ctrl if n_ctrl else 0
+    m["combined_detection_and_identification_rate"] = n_det_id / n_inj if n_inj else 0
+    m["forced_identification_accuracy"] = n_forced_ok / n_forced if n_forced else 0
+    return m
+
+
+def analyze_bias_sweep(args) -> None:
+    """Aggregate metrics across sweep and generate plots/tables (Phase 9).
+
+    Produces:
+    - metrics_vs_meta_layer.png: 3 metrics vs training layer
+    - layer_sweep_summary.csv: full DataFrame
+    - l29_comparison.md: L29 vs baseline comparison table
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sweep_dir = Path(args.output_dir) / "bias_sweep" / args.model
+    analysis_dir = Path(args.output_dir) / "bias_sweep_analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+
+    if not sweep_dir.exists():
+        print(f"No sweep dir at {sweep_dir}. Run evaluate-bias-sweep first.")
+        return
+
+    # Load all results
+    records = []
+    import re as _re
+    pattern = _re.compile(r"layer_(\d+)_strength_([\d.]+)/results\.json$")
+    for adapter_dir in sorted(sweep_dir.glob("L*")):
+        match = _re.search(r"L(\d+)", adapter_dir.name)
+        if not match:
+            continue
+        meta_layer = int(match.group(1))
+        infer_dir = adapter_dir / "infer"
+        if not infer_dir.exists():
+            continue
+        for rp in infer_dir.rglob("results.json"):
+            m = pattern.search(str(rp))
+            if not m:
+                continue
+            injection_layer = int(m.group(1))
+            strength = float(m.group(2))
+            with open(rp) as f:
+                data = json.load(f)
+            metrics = _compute_metrics_from_results(data)
+            metrics["meta_layer"] = meta_layer
+            metrics["injection_layer"] = injection_layer
+            metrics["strength"] = strength
+            records.append(metrics)
+
+    if not records:
+        print("No results found. Run evaluate-bias-sweep first.")
+        return
+
+    df = pd.DataFrame(records)
+    df.to_csv(analysis_dir / "layer_sweep_summary.csv", index=False)
+    print(f"Loaded {len(df)} result rows across {df['meta_layer'].nunique()} meta-layers")
+
+    # ── Plot: metrics vs meta_layer ──
+    METRICS = ["detection_hit_rate", "forced_identification_accuracy",
+               "combined_detection_and_identification_rate"]
+    LABELS = {"detection_hit_rate": "P(detect | injected)",
+              "forced_identification_accuracy": "P(identified | forced)",
+              "combined_detection_and_identification_rate": "P(detect & identified | injected)"}
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+    conditions = df.groupby(["injection_layer", "strength"])
+    for (inj_l, s), cond_df in conditions:
+        agg = cond_df.groupby("meta_layer")[METRICS].mean().reset_index()
+        label = f"L{inj_l} s={s}"
+        for i, metric in enumerate(METRICS):
+            axes[i].plot(agg["meta_layer"], agg[metric], "o-", markersize=2, label=label, linewidth=1)
+
+    for i, metric in enumerate(METRICS):
+        axes[i].set_title(LABELS.get(metric, metric), fontsize=11)
+        axes[i].set_xlabel("Meta-bias layer")
+        axes[i].set_ylabel("Rate" if i == 0 else "")
+        axes[i].set_ylim(-0.05, 1.05)
+        axes[i].grid(True, alpha=0.3)
+    axes[0].legend(fontsize=7, ncol=2, loc="upper left")
+    fig.suptitle("Metrics vs Meta-Bias Training Layer", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(str(analysis_dir / "metrics_vs_meta_layer.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(str(analysis_dir / "metrics_vs_meta_layer.pdf"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Plot: {analysis_dir / 'metrics_vs_meta_layer.png'}")
+
+    # ── L29 comparison table ──
+    l29_df = df[df["meta_layer"] == 29]
+    baseline_df = df[df["meta_layer"] == -1] if -1 in df["meta_layer"].values else None
+
+    # If no baseline in sweep, compute from non-meta-bias mean as proxy
+    if baseline_df is None or baseline_df.empty:
+        # Use meta_layer=0 as proxy baseline (minimal effect)
+        baseline_df = df[df["meta_layer"] == 0]
+
+    if not l29_df.empty and not baseline_df.empty:
+        lines = ["| Metric | Baseline | L29 | Change |", "|---|---|---|---|"]
+        for metric in METRICS:
+            bl = baseline_df[metric].mean()
+            l29 = l29_df[metric].mean()
+            delta = ((l29 - bl) / bl * 100) if bl > 0 else float("inf")
+            lines.append(f"| {LABELS.get(metric, metric)} | {bl:.4f} | {l29:.4f} | {delta:+.0f}% |")
+        md = "\n".join(lines)
+        (analysis_dir / "l29_comparison.md").write_text(md)
+        print(f"  Table: {analysis_dir / 'l29_comparison.md'}")
+        print(md)
+
+    # ── Plot: metrics vs injection layer (multi-arm) ──
+    arm_layers = [0, 20, 29, 40]  # baseline proxy + key meta-layers
+    arm_layers = [l for l in arm_layers if l in df["meta_layer"].unique()]
+    if arm_layers:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+        for ml in arm_layers:
+            arm_df = df[(df["meta_layer"] == ml) & (df["strength"] == 4.0)]
+            if arm_df.empty:
+                # Try any strength
+                arm_df = df[df["meta_layer"] == ml]
+            agg = arm_df.groupby("injection_layer")[METRICS].mean().reset_index()
+            style = "--" if ml == 0 else "-"
+            label = f"L{ml}" if ml > 0 else "baseline"
+            for i, metric in enumerate(METRICS):
+                axes[i].plot(agg["injection_layer"], agg[metric], f"o{style}",
+                             markersize=3, label=label, linewidth=1.5)
+
+        for i, metric in enumerate(METRICS):
+            axes[i].set_title(LABELS.get(metric, metric), fontsize=11)
+            axes[i].set_xlabel("Injection layer")
+            axes[i].set_ylabel("Rate" if i == 0 else "")
+            axes[i].set_ylim(-0.05, 1.05)
+            axes[i].grid(True, alpha=0.3)
+        axes[0].legend(fontsize=9)
+        fig.suptitle("Metrics vs Injection Layer (Meta-Bias Arms)", fontsize=14)
+        fig.tight_layout()
+        fig.savefig(str(analysis_dir / "metrics_vs_injection_layer_arms.png"), dpi=150, bbox_inches="tight")
+        fig.savefig(str(analysis_dir / "metrics_vs_injection_layer_arms.pdf"), bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Plot: {analysis_dir / 'metrics_vs_injection_layer_arms.png'}")
+
+    print(f"\nAnalysis complete: {analysis_dir}")
+
+
+# ============================================================================
 # Argument Parsing
 # ============================================================================
 
@@ -2636,6 +3130,39 @@ def parse_args():
     p6.add_argument("--eval-temperature", type=float, default=DEFAULT_EVAL_TEMPERATURE)
     p6.add_argument("--eval-max-tokens", type=int, default=DEFAULT_EVAL_MAX_TOKENS)
 
+    # ---- Phase 7: train-bias-sweep ----
+    p7 = subparsers.add_parser(
+        "train-bias-sweep", parents=[common],
+        help="Train one bias adapter per meta-layer (Section 6 sweep)",
+    )
+    p7.add_argument("--exp21-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
+    p7.add_argument("--sweep-meta-layers", type=int, nargs="+", default=None,
+                     help="Meta-layers to train (default: all 0-61)")
+    p7.add_argument("--bias-lr", type=float, default=DEFAULT_BIAS_LR)
+    p7.add_argument("--bias-epochs", type=int, default=DEFAULT_BIAS_EPOCHS)
+    p7.add_argument("--bias-batch-size", type=int, default=DEFAULT_BIAS_BATCH_SIZE)
+    p7.add_argument("--bias-injection-layers", type=int, nargs="+", default=DEFAULT_BIAS_LAYERS)
+    p7.add_argument("--bias-injection-strengths", type=float, nargs="+", default=DEFAULT_BIAS_STRENGTHS)
+    p7.add_argument("--bias-target-modules", type=str, nargs="+", default=["mlp.down_proj"])
+
+    # ---- Phase 8: evaluate-bias-sweep ----
+    p8 = subparsers.add_parser(
+        "evaluate-bias-sweep", parents=[common],
+        help="Evaluate each adapter at multiple injection layers × strengths",
+    )
+    p8.add_argument("--exp21-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
+    p8.add_argument("--sweep-injection-layers", type=int, nargs="+", default=DEFAULT_SWEEP_INJECTION_LAYERS)
+    p8.add_argument("--sweep-eval-strengths", type=float, nargs="+", default=DEFAULT_SWEEP_EVAL_STRENGTHS)
+    p8.add_argument("--sweep-n-trials", type=int, default=DEFAULT_SWEEP_N_TRIALS)
+    p8.add_argument("--sweep-n-concepts", type=int, default=DEFAULT_SWEEP_CONCEPTS)
+    p8.add_argument("-nlj", "--no-llm-judge", action="store_true")
+
+    # ---- Phase 9: analyze-bias-sweep ----
+    p9 = subparsers.add_parser(
+        "analyze-bias-sweep", parents=[common],
+        help="Aggregate metrics and generate plots/tables",
+    )
+
     # ---- All phases ----
     p_all = subparsers.add_parser(
         "all", parents=[common],
@@ -2689,6 +3216,9 @@ def main():
         print("  python 14_trained_steering_vector.py generate-bias-data --model gemma3_27b")
         print("  python 14_trained_steering_vector.py train-bias --model gemma3_27b")
         print("  python 14_trained_steering_vector.py evaluate-bias --model gemma3_27b")
+        print("  python 14_trained_steering_vector.py train-bias-sweep --model gemma3_27b")
+        print("  python 14_trained_steering_vector.py evaluate-bias-sweep --model gemma3_27b")
+        print("  python 14_trained_steering_vector.py analyze-bias-sweep --model gemma3_27b")
         print("  python 14_trained_steering_vector.py all --model gemma3_27b --other-model qwen_7b")
         return
 
@@ -2712,6 +3242,15 @@ def main():
 
     elif args.phase == "evaluate-bias":
         evaluate_bias_adapter(args)
+
+    elif args.phase == "train-bias-sweep":
+        train_bias_sweep(args)
+
+    elif args.phase == "evaluate-bias-sweep":
+        evaluate_bias_sweep(args)
+
+    elif args.phase == "analyze-bias-sweep":
+        analyze_bias_sweep(args)
 
     elif args.phase == "all":
         # Phase 1: Data preparation
