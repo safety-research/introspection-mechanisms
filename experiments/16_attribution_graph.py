@@ -4,22 +4,26 @@ Experiment 62: SAE Steering Attribution & Attribution Graph
 
 Performs SAE-level steering attribution (SA) analysis and builds multi-hop
 attribution graphs tracing introspective detection through SAE/transcoder
-features. Combines two complementary analyses:
+features.
 
   Section A: Steering Attribution (SA) extraction
-             -- For each SAE feature at each layer, computes:
-                GA = gradient attribution (dL/dx . w_dec_f)
-                SG = steering gradient (dx/dalpha @ w_enc[:, f]) via JVP
-                SA = GA * SG
-             -- Integrates SA across injection strengths to get ISA.
+             -- Two-pass extraction per strength:
+                Pass 1 (GA): forward + backward from loss → dL/dx at each SAE site
+                Pass 2 (SG): JVP w.r.t. steering α → dx/dα at each SAE site (cacheable)
+                Combine: SA(f) = GA(f) × SG(f) per active feature
+             -- Integrates SA across strengths via Simpson's rule → ISA.
+             -- SG is cached from hop-0 and reused for hop-1+ (halves GPU cost).
 
   Section B: Attribution Graph construction
-             -- Selects top features by ISA magnitude (IQR outlier detection)
-             -- Recursively traces upstream: for each selected feature, computes
-                feature-targeted SA (loss = target feature activation) to find
-                which upstream features drive it.
-             -- Builds a multi-hop directed graph from injection layer to logit
-                objective, rendered as Graphviz PDF and interactive Plotly HTML.
+             -- Computes GA-weighted edge weights: ew = ∫ GA_root(α) × SA(α) dα
+             -- Per-type frac-of-max feature selection with per-hop caps [8,5,3,2]
+             -- Only ATTN+TC features traced to next hop (MLP/RESID excluded)
+             -- Backward tracing: feature-targeted SA (loss = target feature activation)
+             -- Forward tracing: JVP from source decoder × GA_root → downstream SA
+             -- Builds directed graph rendered as interactive Plotly HTML + PDF
+
+  Auto-Config: Logit lens sweep + strength scan with LLM judge
+             -- Auto-detects pos/neg token IDs and optimal injection strength
 
 Paper sections supported:
   - Section 5.3 ("Gate and Evidence Carrier Features")
@@ -27,23 +31,26 @@ Paper sections supported:
   - Appendix: Steering Attribution Framework
   - Figure 16 (bread-layer37-single-col): Attribution graph visualization
 
-Model: Primarily Gemma-3 27B with Gemma Scope 2 SAEs/Transcoders
+Model: Primarily Gemma-3 27B with Gemma Scope 2 SAEs/Transcoders (262k, big)
 Steering: Layer 37, strength 4.0 (configurable)
 
 Usage:
-    # Section A: Extract SA for a concept at one strength (GPU)
+    # Auto-configure pos/neg tokens and optimal strength (GPU)
+    python 16_attribution_graph.py auto-config --concept Bread --layer 37
+
+    # Extract SA at one strength (GPU)
     python 16_attribution_graph.py extract-sa --concept Bread --layer 37 --strength 4.0
 
-    # Section A: Compute ISA by integrating SA across strengths (no GPU)
+    # Compute ISA by integrating SA across strengths (no GPU)
     python 16_attribution_graph.py compute-isa --concept Bread --layer 37
 
-    # Section B: Build full attribution graph (requires SA data)
-    python 16_attribution_graph.py build-graph --concept Bread --layer 37
+    # Build attribution graph with backward + forward tracing (requires SA data)
+    python 16_attribution_graph.py build-graph --concept Bread --layer 37 --direction both
 
-    # Full pipeline: extract SA at multiple strengths, compute ISA, build graph
-    python 16_attribution_graph.py all --concept Bread --layer 37
+    # Full pipeline: extract SA, compute ISA, build graph
+    python 16_attribution_graph.py all --concept Bread --layer 37 --direction both
 
-    # Visualize existing graph
+    # Re-render existing graph from JSON
     python 16_attribution_graph.py visualize --concept Bread --layer 37
 """
 
