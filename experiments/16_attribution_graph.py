@@ -869,6 +869,29 @@ def run_auto_config(args) -> None:
 # Section A: SA Extraction
 # =============================================================================
 
+def _save_sg_cache(tangent_data: Dict[Tuple[int, str], torch.Tensor], cache_path: Path) -> None:
+    """Save SG tangent data to safetensors file."""
+    from safetensors.torch import save_file
+    flat = {}
+    for (li, suffix), tensor in tangent_data.items():
+        flat[f"{li}__{suffix.replace('.', '_')}"] = tensor.cpu().contiguous()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    save_file(flat, str(cache_path))
+
+
+def _load_sg_cache(cache_path: Path, device: str = "cpu") -> Dict[Tuple[int, str], torch.Tensor]:
+    """Load SG tangent data from safetensors file."""
+    from safetensors.torch import load_file
+    flat = load_file(str(cache_path), device=device)
+    tangent_data = {}
+    for key, tensor in flat.items():
+        parts = key.split("__", 1)
+        li = int(parts[0])
+        suffix = parts[1].replace("_", ".", 3)  # Restore dots in suffix
+        tangent_data[(li, suffix)] = tensor
+    return tangent_data
+
+
 def _extract_sa_core(
     model_wrapper: ModelWrapper,
     concept: str,
@@ -884,6 +907,8 @@ def _extract_sa_core(
     pos_token_id: int = 12932,
     neg_token_id: int = 3771,
     compute_remainder: bool = True,
+    # ── SG caching ──
+    sg_cache_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """Core two-pass SA extraction shared by both loss modes.
 
@@ -892,6 +917,11 @@ def _extract_sa_core(
       Pass 2 (JVP forward): Compute SG = dx/dalpha via forward-mode AD
       Combine: SA = GA * SG per active feature
 
+    SG caching: Pass 2 (JVP) depends only on steering, not on the loss function.
+    In root mode, SG is saved to sg_cache_dir. In feature-targeted mode, SG is
+    loaded from cache (skipping the expensive JVP pass entirely). This halves
+    GPU cost for hop-1+ targets.
+
     Args:
         target: If None, uses logit-gap loss (root mode, all layers).
                 If dict with {layer, sae_type, feature_id, token_pos},
@@ -899,6 +929,9 @@ def _extract_sa_core(
         pos_token_id / neg_token_id: Token IDs for logit-gap loss (root mode only).
         compute_remainder: Whether to compute per-token remainder SA diagnostics.
                           True for root mode, False for feature-targeted mode.
+        sg_cache_dir: Directory for SG cache files. If set:
+                      - root mode: saves tangent_data.safetensors after JVP
+                      - feature-targeted mode: loads from cache, skips JVP
 
     Returns:
         List of row dicts ready for pd.DataFrame / parquet.
@@ -1021,43 +1054,58 @@ def _extract_sa_core(
     del raw_acts, outputs
     torch.cuda.empty_cache()
 
-    # ── Pass 2: JVP for SG ──
-    alpha_primal = torch.tensor(strength, dtype=torch.float32, device=device)
-    alpha_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
+    # ── Pass 2: JVP for SG (with caching) ──
+    # SG depends only on steering, not loss. Cache from root mode, reuse in feature-targeted.
+    strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
+    sg_cache_file = sg_cache_dir / strength_str / "tangent_data.safetensors" if sg_cache_dir else None
 
-    def jvp_forward(alpha_val):
-        handle = layers_module[injection_layer].register_forward_hook(make_steering_hook(alpha_val))
-        hooks = ActivationHooks(inner, retain_grad=False)
-        hooks.register_hooks(list(range(layer_lo, layer_hi)), CAPTURE_TYPES_SAE)
-        try:
-            with hooks:
-                inner.eval()
-                _ = inner(input_ids=input_ids, attention_mask=attention_mask,
-                          output_hidden_states=False, return_dict=True)
-        finally:
-            handle.remove()
-            hooks.remove_hooks()
-        raw = hooks.get_activations()
-        result = []
-        for li in range(layer_lo, layer_hi):
-            for suffix in JVP_SITE_SUFFIXES:
-                akey = _act_key(li, suffix)
-                t = raw[akey][0] if akey in raw and raw[akey] else torch.zeros(1)
-                if isinstance(t, (list, tuple)):
-                    t = t[0]
-                result.append(t[0] if t.dim() == 3 else t)
-        return result
+    if not is_root and sg_cache_file and sg_cache_file.exists():
+        # Feature-targeted mode with cached SG: skip JVP entirely
+        tangent_data = _load_sg_cache(sg_cache_file, device=device)
+        print(f"  SG loaded from cache: {sg_cache_file}")
+    else:
+        # Compute SG via JVP
+        alpha_primal = torch.tensor(strength, dtype=torch.float32, device=device)
+        alpha_tangent = torch.tensor(1.0, dtype=torch.float32, device=device)
 
-    _, site_tangents = torch.func.jvp(jvp_forward, (alpha_primal,), (alpha_tangent,))
+        def jvp_forward(alpha_val):
+            handle = layers_module[injection_layer].register_forward_hook(make_steering_hook(alpha_val))
+            hooks = ActivationHooks(inner, retain_grad=False)
+            hooks.register_hooks(list(range(layer_lo, layer_hi)), CAPTURE_TYPES_SAE)
+            try:
+                with hooks:
+                    inner.eval()
+                    _ = inner(input_ids=input_ids, attention_mask=attention_mask,
+                              output_hidden_states=False, return_dict=True)
+            finally:
+                handle.remove()
+                hooks.remove_hooks()
+            raw = hooks.get_activations()
+            result = []
+            for li in range(layer_lo, layer_hi):
+                for suffix in JVP_SITE_SUFFIXES:
+                    akey = _act_key(li, suffix)
+                    t = raw[akey][0] if akey in raw and raw[akey] else torch.zeros(1)
+                    if isinstance(t, (list, tuple)):
+                        t = t[0]
+                    result.append(t[0] if t.dim() == 3 else t)
+            return result
 
-    tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
-    for li_offset, li in enumerate(range(layer_lo, layer_hi)):
-        for j, suffix in enumerate(JVP_SITE_SUFFIXES):
-            idx = li_offset * len(JVP_SITE_SUFFIXES) + j
-            tangent_data[(li, suffix)] = site_tangents[idx].detach()
+        _, site_tangents = torch.func.jvp(jvp_forward, (alpha_primal,), (alpha_tangent,))
 
-    del site_tangents
-    torch.cuda.empty_cache()
+        tangent_data: Dict[Tuple[int, str], torch.Tensor] = {}
+        for li_offset, li in enumerate(range(layer_lo, layer_hi)):
+            for j, suffix in enumerate(JVP_SITE_SUFFIXES):
+                idx = li_offset * len(JVP_SITE_SUFFIXES) + j
+                tangent_data[(li, suffix)] = site_tangents[idx].detach()
+
+        del site_tangents
+        torch.cuda.empty_cache()
+
+        # Root mode: save SG to cache for reuse by hop-1+ targets
+        if is_root and sg_cache_file:
+            _save_sg_cache(tangent_data, sg_cache_file)
+            print(f"  SG cached: {sg_cache_file}")
 
     # ── Combine: compute SA per active feature ──
     base_meta: Dict[str, Any] = {
@@ -1200,9 +1248,11 @@ def extract_steering_attribution(
     sae_width: str = DEFAULT_SAE_WIDTH,
     sae_l0: str = DEFAULT_SAE_L0,
     device: str = "cuda",
+    sg_cache_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """Extract SA for all SAE features at one injection strength (root logit-gap loss).
 
+    If sg_cache_dir is set, saves SG tangent data for reuse by hop-1+ targets.
     Returns path to output parquet, or None on failure.
     """
     import pandas as pd
@@ -1211,7 +1261,7 @@ def extract_steering_attribution(
         model_wrapper, concept, concept_vector, injection_layer, strength,
         trial_num, sae_width, sae_l0, device,
         target=None, pos_token_id=pos_token_id, neg_token_id=neg_token_id,
-        compute_remainder=True,
+        compute_remainder=True, sg_cache_dir=sg_cache_dir,
     )
 
     strength_str = f"strength_{int(strength)}_{int((strength % 1) * 100):02d}"
@@ -1238,9 +1288,11 @@ def extract_feature_target_sa(
     sae_width: str = DEFAULT_SAE_WIDTH,
     sae_l0: str = DEFAULT_SAE_L0,
     device: str = "cuda",
+    sg_cache_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """Extract feature-targeted SA (loss = target feature activation).
 
+    If sg_cache_dir is set and contains cached SG from hop-0, skips JVP pass entirely.
     Returns path to output parquet, or None on failure.
     """
     import pandas as pd
@@ -1252,7 +1304,7 @@ def extract_feature_target_sa(
     rows = _extract_sa_core(
         model_wrapper, concept, concept_vector, injection_layer, strength,
         trial_num, sae_width, sae_l0, device,
-        target=target, compute_remainder=False,
+        target=target, compute_remainder=False, sg_cache_dir=sg_cache_dir,
     )
 
     tgt_subdir = f"{target_sae_type}_L{target_layer}_F{target_feature_id}_T{target_token_pos}"
@@ -1774,7 +1826,8 @@ def build_attribution_graph(
             mpt = _get_from_list(max_per_type, hop + 1)
             print(f"\n  Backward hop {hop+1}: tracing {len(bwd_targets)} targets (cap {mpt}/type)...")
 
-            # Extract feature-targeted SA
+            # Extract feature-targeted SA (uses SG cache from hop-0)
+            sg_cache = output_dir / "sg_cache"
             for target in bwd_targets:
                 print(f"    {target.short_name()}...")
                 for s in tqdm(feat_sa_strengths, desc=f"    SA", leave=False):
@@ -1783,6 +1836,7 @@ def build_attribution_graph(
                         injection_layer, s,
                         target.layer, target.sae_type, target.feature_id, target.token_pos,
                         output_dir, trial_num=trial_nums[0], device=device,
+                        sg_cache_dir=sg_cache,
                     )
 
             # Compute GA-weighted edge weights and select
@@ -2167,7 +2221,8 @@ def main():
             return
         extract_steering_attribution(
             mw, concept, vectors[concept], layer, args.strength,
-            base_out, trial_num, pos_id, neg_id, args.sae_width, args.sae_l0, args.device)
+            base_out, trial_num, pos_id, neg_id, args.sae_width, args.sae_l0, args.device,
+            sg_cache_dir=base_out / "sg_cache")
 
     elif args.phase == "compute-isa":
         print(f"Computing ISA for {concept} layer {layer}")
@@ -2223,13 +2278,15 @@ def main():
             return
         vec = vectors[concept]
 
-        # Step 1: Extract SA at multiple strengths
+        # Step 1: Extract SA at multiple strengths (saves SG cache for hop-1+ reuse)
+        sg_cache = base_out / "sg_cache"
         strengths = np.linspace(0, args.strength_max, args.n_strengths).tolist()
-        print(f"\nStep 1: Extracting SA at {len(strengths)} strengths...")
+        print(f"\nStep 1: Extracting SA at {len(strengths)} strengths (SG cached to {sg_cache})...")
         for s in tqdm(strengths, desc="SA extraction"):
             extract_steering_attribution(
                 mw, concept, vec, layer, s, base_out, trial_num,
-                pos_id, neg_id, args.sae_width, args.sae_l0, args.device)
+                pos_id, neg_id, args.sae_width, args.sae_l0, args.device,
+                sg_cache_dir=sg_cache)
 
         # Step 2: Compute ISA
         print("\nStep 2: Computing ISA...")
