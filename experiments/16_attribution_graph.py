@@ -721,12 +721,12 @@ def run_strength_scan(
 
             sv = concept_vector.to(device).float() * strength
 
-            def make_hook():
+            def make_hook(steering_vec=sv, start=steer_start):
                 def hook(module, input, output):
                     h = output[0] if isinstance(output, tuple) else output
                     rest = output[1:] if isinstance(output, tuple) else ()
                     addition = torch.zeros_like(h)
-                    addition[:, steer_start:, :] = sv.unsqueeze(0)
+                    addition[:, start:, :] = steering_vec.unsqueeze(0)
                     return (h + addition,) + rest if isinstance(output, tuple) else h + addition
                 return hook
 
@@ -744,7 +744,7 @@ def run_strength_scan(
             })
 
         # Evaluate with LLM judge
-        evaluations = batch_evaluate(judge, trial_results, [concept])
+        evaluations = batch_evaluate(judge, trial_results)
         metrics = compute_detection_and_identification_metrics(evaluations)
         sweep.append({"strength": strength, "metrics": metrics})
 
