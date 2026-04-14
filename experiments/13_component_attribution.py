@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment 59: Steering Attribution Analysis
+Experiment 59: Component Attribution Analysis
 
-Performs causal component analysis for the "Mechanisms of Introspective Awareness"
-paper. Three complementary analyses:
+Per-layer component-level causal analysis for the "Mechanisms of Introspective
+Awareness" paper. Three complementary analyses at the attn-vs-MLP granularity:
 
   Section A: Per-layer component mean ablation (knockout / knock-in)
              -- identifies which layers' attention and MLP components are
                 causally necessary for introspective detection.
-  Section B: Per-layer component gradient attribution
-             -- gradient-based sensitivity analysis (faster complement to A).
+  Section B: Per-layer component gradient sensitivity
+             -- ||dL/dx||₂ per component (faster complement to A).
   Section D: Attention routing analysis
              -- measures how attention patterns shift under steering.
+
+Note: This is component-level analysis (attn vs MLP per layer). For
+SAE-feature-level steering attribution (SA = GA × SG), see
+16_steering_attribution.py and 17_attribution_graph.py.
 
 Paper sections supported:
   - Section 5.2 ("Identifying Causal Components")
@@ -22,10 +26,10 @@ Model: Gemma-3 27B (62 layers, 32 heads, d_model=5376, head_dim=128)
 Steering: Layer 37, strength 4.0. Analysis layers: 38-61
 
 Usage:
-    python 13_steering_attribution.py -m gemma3_27b
-    python 13_steering_attribution.py -m gemma3_27b --sections A B
-    python 13_steering_attribution.py -m gemma3_27b --n-concepts 10 --n-trials 3
-    python 13_steering_attribution.py -m gemma3_27b --plots-only
+    python 13_component_attribution.py -m gemma3_27b
+    python 13_component_attribution.py -m gemma3_27b --sections A B
+    python 13_component_attribution.py -m gemma3_27b --n-concepts 10 --n-trials 3
+    python 13_component_attribution.py -m gemma3_27b --plots-only
 """
 
 import argparse
