@@ -3,7 +3,7 @@
 Code for the paper *"Mechanisms of Introspective Awareness"*.
 
 **Paper**: https://arxiv.org/abs/2603.21396
-**LessWrong**: 
+**Blog**: https://www.lesswrong.com/posts/BNMLtuDTNBwGHcnQX/mechanisms-of-introspective-awareness
 
 ## Overview
 
