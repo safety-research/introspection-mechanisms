@@ -32,7 +32,7 @@ Usage:
     python 14_trained_steering_vector.py finetune --model gemma3_27b
 
     # Phase 3: Evaluate finetuned model
-    python 14_trained_steering_vector.py evaluate --model gemma3_27b --adapter-path analysis/exp60_prefill_trained/adapter
+    python 14_trained_steering_vector.py evaluate --model gemma3_27b --adapter-path analysis/14_trained_steering_vector/adapter
 
     # Phase 3: Evaluate unfinetuned baseline for comparison
     python 14_trained_steering_vector.py evaluate --model gemma3_27b --no-adapter
@@ -235,19 +235,19 @@ DEFAULT_GRADIENT_ACCUMULATION = 8
 DEFAULT_MAX_SEQ_LEN = 2048
 
 # Evaluation defaults
-# For gemma3-27b, exp21 shows best introspection at layer ~0.50, strength=8.0
+# For gemma3-27b, experiment 02 (steering evaluation) shows best introspection at layer ~0.50, strength=8.0
 DEFAULT_LAYER_FRACTION = 0.50
 DEFAULT_STRENGTH = 8.0
 DEFAULT_N_CONTROL = 50
 DEFAULT_EVAL_TEMPERATURE = 0.7
 DEFAULT_EVAL_MAX_TOKENS = 100
 
-DEFAULT_OUTPUT_DIR = "analysis/exp60_prefill_trained"
+DEFAULT_OUTPUT_DIR = "analysis/14_trained_steering_vector"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 
 # Bias tuning defaults (Section 6: Training a Bias Vector for Introspection)
-DEFAULT_BIAS_OUTPUT_DIR = "analysis/exp60_bias_trained"
+DEFAULT_BIAS_OUTPUT_DIR = "analysis/14_bias_trained"
 DEFAULT_BIAS_LR = 1e-3
 DEFAULT_BIAS_EPOCHS = 1
 DEFAULT_BIAS_BATCH_SIZE = 8
@@ -257,7 +257,7 @@ DEFAULT_N_TRAIN_CONCEPTS = 400
 DEFAULT_N_EVAL_CONCEPTS = 100
 DEFAULT_N_TRIALS_PER_CONCEPT = 10
 DEFAULT_CONTROL_RATIO = 0.5
-DEFAULT_BIAS_EXP21_DIR = "analysis/exp21_more_concepts_steering"
+DEFAULT_BIAS_EXP21_DIR = "analysis/02b_steering_500_concepts"
 DEFAULT_BIAS_INJECTION_LAYER = 37
 DEFAULT_BIAS_SEED = 42
 
@@ -2033,10 +2033,10 @@ def generate_bias_training_data(args) -> None:
     hf_path = MODEL_NAME_MAP.get(model_name, model_name)
     tokenizer = AutoTokenizer.from_pretrained(hf_path, trust_remote_code=True)
 
-    # Load concepts from exp21
-    exp21_dir = getattr(args, "exp21_dir", DEFAULT_BIAS_EXP21_DIR)
+    # Load concepts from experiment 02 (steering evaluation)
+    steering_dir = getattr(args, "steering_dir", DEFAULT_BIAS_EXP21_DIR)
     layer = getattr(args, "bias_layer", DEFAULT_BIAS_INJECTION_LAYER)
-    all_concepts_path = Path(exp21_dir) / model_name / f"layer_{layer}_strength_4.0" / "results.json"
+    all_concepts_path = Path(steering_dir) / model_name / f"layer_{layer}_strength_4.0" / "results.json"
 
     if all_concepts_path.exists():
         with open(all_concepts_path) as f:
@@ -2208,13 +2208,13 @@ def train_bias_adapter(args) -> None:
     )
 
     # Load concept vectors
-    exp21_dir = getattr(args, "exp21_dir", DEFAULT_BIAS_EXP21_DIR)
+    steering_dir = getattr(args, "steering_dir", DEFAULT_BIAS_EXP21_DIR)
     bias_layers = getattr(args, "bias_injection_layers", DEFAULT_BIAS_LAYERS)
     bias_strengths = getattr(args, "bias_injection_strengths", DEFAULT_BIAS_STRENGTHS)
 
     unique_concepts = set(e["concept"] for e in train_examples if e.get("concept"))
     concept_vectors: Dict[Tuple, torch.Tensor] = {}
-    vectors_dir = Path(exp21_dir) / model_name / "vectors"
+    vectors_dir = Path(steering_dir) / model_name / "vectors"
     for layer_idx in bias_layers:
         layer_dir = vectors_dir / f"layer_{layer_idx}"
         if not layer_dir.exists():
@@ -2445,8 +2445,7 @@ def evaluate_bias_adapter(args) -> None:
 # ============================================================================
 # Section 6 Sweep: Train/Evaluate/Analyze across meta-layers
 # ============================================================================
-# Reproduces analysis/1_pipeline_introspection_analysis_500 and
-# analysis/2_thought_injection_with_adapters_500_meta_bias from the working repo.
+# Sweeps bias vector across all meta-layers (L00-L61) and evaluates each.
 # Trains one bias adapter per meta-layer (L00-L61), evaluates each at multiple
 # injection layers × strengths with LLM judge, then aggregates metrics.
 
@@ -2499,11 +2498,11 @@ def train_bias_sweep(args) -> None:
     n_epochs = getattr(args, "bias_epochs", DEFAULT_BIAS_EPOCHS)
     batch_size = getattr(args, "bias_batch_size", DEFAULT_BIAS_BATCH_SIZE)
     target_modules = getattr(args, "bias_target_modules", ["mlp.down_proj"])
-    exp21_dir = getattr(args, "exp21_dir", DEFAULT_BIAS_EXP21_DIR)
+    steering_dir = getattr(args, "steering_dir", DEFAULT_BIAS_EXP21_DIR)
 
     # Load concept vectors once (shared across all meta-layers)
     unique_concepts = set(e["concept"] for e in train_examples if e.get("concept"))
-    vectors_dir = Path(exp21_dir) / model_name / "vectors"
+    vectors_dir = Path(steering_dir) / model_name / "vectors"
     concept_vectors: Dict[Tuple, torch.Tensor] = {}
     for layer_idx in bias_injection_layers:
         layer_dir = vectors_dir / f"layer_{layer_idx}"
@@ -2639,7 +2638,7 @@ def evaluate_bias_sweep(args) -> None:
     strengths = getattr(args, "sweep_eval_strengths", DEFAULT_SWEEP_EVAL_STRENGTHS)
     n_trials = getattr(args, "sweep_n_trials", DEFAULT_SWEEP_N_TRIALS)
     n_concepts = getattr(args, "sweep_n_concepts", DEFAULT_SWEEP_CONCEPTS)
-    exp21_dir = getattr(args, "exp21_dir", DEFAULT_BIAS_EXP21_DIR)
+    steering_dir = getattr(args, "steering_dir", DEFAULT_BIAS_EXP21_DIR)
     use_llm_judge = not getattr(args, "no_llm_judge", False)
 
     adapter_dirs = sorted(sweep_dir.glob("L*"))
@@ -2681,7 +2680,8 @@ def evaluate_bias_sweep(args) -> None:
         steer_end_pos = find_steer_end_position(model_wrapper, response1, response2)
 
         # Load concepts
-        all_concepts_path = Path(exp21_dir) / args.model / f"layer_37_strength_4.0" / "results.json"
+        injection_layer = getattr(args, "bias_injection_layer", DEFAULT_BIAS_INJECTION_LAYER)
+        all_concepts_path = Path(steering_dir) / args.model / f"layer_{injection_layer}_strength_4.0" / "results.json"
         if all_concepts_path.exists():
             with open(all_concepts_path) as f:
                 data = json.load(f)
@@ -3099,7 +3099,7 @@ def parse_args():
         "generate-bias-data", parents=[common],
         help="Generate training data for bias adapter (Section 6)",
     )
-    p4.add_argument("--exp21-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
+    p4.add_argument("--steering-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
     p4.add_argument("--bias-layer", type=int, default=DEFAULT_BIAS_INJECTION_LAYER)
     p4.add_argument("--n-train-concepts", type=int, default=DEFAULT_N_TRAIN_CONCEPTS)
     p4.add_argument("--n-eval-concepts", type=int, default=DEFAULT_N_EVAL_CONCEPTS)
@@ -3111,7 +3111,7 @@ def parse_args():
         "train-bias", parents=[common],
         help="Train bias adapter for introspection (Section 6)",
     )
-    p5.add_argument("--exp21-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
+    p5.add_argument("--steering-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
     p5.add_argument("--bias-lr", type=float, default=DEFAULT_BIAS_LR)
     p5.add_argument("--bias-epochs", type=int, default=DEFAULT_BIAS_EPOCHS)
     p5.add_argument("--bias-batch-size", type=int, default=DEFAULT_BIAS_BATCH_SIZE)
@@ -3135,7 +3135,7 @@ def parse_args():
         "train-bias-sweep", parents=[common],
         help="Train one bias adapter per meta-layer (Section 6 sweep)",
     )
-    p7.add_argument("--exp21-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
+    p7.add_argument("--steering-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
     p7.add_argument("--sweep-meta-layers", type=int, nargs="+", default=None,
                      help="Meta-layers to train (default: all 0-61)")
     p7.add_argument("--bias-lr", type=float, default=DEFAULT_BIAS_LR)
@@ -3150,7 +3150,7 @@ def parse_args():
         "evaluate-bias-sweep", parents=[common],
         help="Evaluate each adapter at multiple injection layers × strengths",
     )
-    p8.add_argument("--exp21-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
+    p8.add_argument("--steering-dir", type=str, default=DEFAULT_BIAS_EXP21_DIR)
     p8.add_argument("--sweep-injection-layers", type=int, nargs="+", default=DEFAULT_SWEEP_INJECTION_LAYERS)
     p8.add_argument("--sweep-eval-strengths", type=float, nargs="+", default=DEFAULT_SWEEP_EVAL_STRENGTHS)
     p8.add_argument("--sweep-n-trials", type=int, default=DEFAULT_SWEEP_N_TRIALS)

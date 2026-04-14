@@ -45,7 +45,7 @@ load_dotenv()
 # CONFIGURATION
 # ============================================================================
 MODEL_ID = "google/gemma-3-27b-it"
-RESULTS_DIR = "analysis/exp39_optimization_results"
+RESULTS_DIR = "analysis/03e_optimize_abliteration"
 MAX_TOKENS = 100
 
 # Starting weights (14 contiguous regions as described in Appendix F).
@@ -94,7 +94,7 @@ N_TRIALS = 500  # Number of Optuna trials (14 regions)
 #                  Faster but less accurate (anchoring effects).
 #                  Use this to continue optimization from existing runs without systematic bias.
 #   "individual" = New style: one item per judge call (fired concurrently).
-#                  Consistent with exp39_remove_refusal_direction.py scoring.
+#                  Consistent with 03d_refusal_abliteration.py scoring.
 JUDGE_MODE = "batched"
 
 
@@ -134,7 +134,7 @@ class RegionAblationModel:
         )
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-        self.refusal_dirs = torch.load("analysis/exp39_remove_refusal_direction/gemma3_27b/refusal_directions.pt")
+        self.refusal_dirs = torch.load("analysis/03d_refusal_abliteration/gemma3_27b/refusal_directions.pt")
         print(f"Loaded refusal directions: {self.refusal_dirs.shape}")
 
         if hasattr(self.model.model, 'language_model'):
@@ -627,7 +627,7 @@ def run_optimization():
         print(f"\n  Loaded {len(all_results)} previous results from JSONL")
 
     study = optuna.create_study(
-        study_name="exp39_region_weights",
+        study_name="abliteration_region_weights",
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42),
         storage=storage_url,
@@ -796,4 +796,19 @@ def run_optimization():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Bayesian optimization for refusal abliteration weights (Appendix F)."
+    )
+    parser.add_argument("--n-trials", type=int, default=N_TRIALS, help=f"Number of Optuna trials (default: {N_TRIALS})")
+    parser.add_argument("--results-dir", type=str, default=RESULTS_DIR, help=f"Results directory (default: {RESULTS_DIR})")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help=f"Generation batch size (default: {BATCH_SIZE})")
+    parser.add_argument("--harmful-runs", type=int, default=HARMFUL_RUNS, help=f"Runs per harmful prompt (default: {HARMFUL_RUNS})")
+    args = parser.parse_args()
+
+    N_TRIALS = args.n_trials
+    RESULTS_DIR = args.results_dir
+    BATCH_SIZE = args.batch_size
+    HARMFUL_RUNS = args.harmful_runs
+
     run_optimization()

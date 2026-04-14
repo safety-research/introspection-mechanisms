@@ -6,9 +6,12 @@ Each direction is defined by:
 - A set of "negative" prompts that activate the opposite (desired) behavior
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from typing import Dict, List, Tuple
 
-from exp39_prompts import HARMFUL_PROMPTS, HARMLESS_PROMPTS
+from refusal_prompts import HARMFUL_PROMPTS, HARMLESS_PROMPTS
 
 
 # Shared user prompts for behavior directions (safe, non-harmful content)

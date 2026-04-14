@@ -8,6 +8,9 @@ import argparse
 import subprocess
 import sys
 
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # Import the 450 additional concepts
 from concepts_list import NEW_CONCEPTS
 
@@ -30,7 +33,7 @@ ALL_CONCEPTS = BASELINE_CONCEPTS + NEW_CONCEPTS
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run exp21 with 500 concepts (50 baseline + 450 new)")
+    parser = argparse.ArgumentParser(description="Run experiment 02 (steering evaluation) with 500 concepts (50 baseline + 450 new)")
     parser.add_argument("-m", "--model", type=str, default="gemma3_27b", help="Model name (default: gemma3_27b)")
     parser.add_argument("-sl", "--specific-layers", type=int, nargs="+", default=[38], help="Specific layer indices to test (default: 38)")
     parser.add_argument("-s", "--strength", type=float, default=4.0, help="Steering strength (default: 4.0)")
@@ -40,14 +43,14 @@ def parse_args():
     parser.add_argument("-cspt", "--control-samples-per-trial", type=int, default=50, help="Control samples per trial number - global, not per concept (default: 50)")
     # DEPRECATED: kept for backward compatibility
     parser.add_argument("-nt", "--n-trials", type=int, default=None, help="DEPRECATED: Use --samples-per-trial instead")
-    parser.add_argument("-od", "--output-dir", type=str, default="analysis/exp21_more_concepts_steering", help="Output directory (default: analysis/exp21_more_concepts_steering)")
+    parser.add_argument("-od", "--output-dir", type=str, default="analysis/02b_steering_500_concepts", help="Output directory (default: analysis/02b_steering_500_concepts)")
     parser.add_argument("-ij", "--incremental-judge", action="store_true", default=True, help="Run LLM judge after each concept (default: True)")
     parser.add_argument("-no-ij", "--no-incremental-judge", action="store_true", help="Disable incremental judge")
     parser.add_argument("-ow", "--overwrite", action="store_true", help="Overwrite existing results (default: False, resume from partial)")
     parser.add_argument("-nlj", "--no-llm-judge", action="store_true", help="Disable LLM judge entirely")
     parser.add_argument("-rf", "--run-forced", action="store_true", help="Run forced injection trials (disabled by default)")
     parser.add_argument("-bs", "--batch-size", type=int, default=None, help="Batch size for generation (default: 300)")
-    parser.add_argument("-uvf", "--use-vectors-from", type=str, default=None, help="Path to existing vectors folder to copy instead of extracting (e.g., analysis/exp21_more_concepts_steering/gemma3_27b/vectors). This avoids 'double ablation' when running abliterated models.")
+    parser.add_argument("-uvf", "--use-vectors-from", type=str, default=None, help="Path to existing vectors folder to copy instead of extracting (e.g., analysis/02b_steering_500_concepts/gemma3_27b/vectors). This avoids 'double ablation' when running abliterated models.")
     parser.add_argument("-env", "--extract-native-vectors", action="store_true", help="When using -uvf, also extract vectors from the loaded model and save to 'abliterated_vectors/'")
     return parser.parse_args()
 
@@ -106,7 +109,7 @@ def main():
     layers_str = ", ".join(str(l) for l in args.specific_layers)
     total_injection_per_concept = args.max_trial_number * samples_per_trial
     total_control = args.max_trial_number * args.control_samples_per_trial
-    print(f"\nRunning exp21 with {len(ALL_CONCEPTS)} total concepts...")
+    print(f"\nRunning experiment 02 (steering evaluation) with {len(ALL_CONCEPTS)} total concepts...")
     print(f"Model: {args.model}")
     print(f"Target layers: {layers_str}, strength: {args.strength}")
     print(f"Trial structure: {args.max_trial_number} trial numbers × {samples_per_trial} samples = {total_injection_per_concept} per concept")

@@ -53,18 +53,18 @@ from eval_utils import LLMJudge
 
 parser = argparse.ArgumentParser(description="Experiment 9: Activation Patching for Introspection Circuits")
 parser.add_argument("-m", "--model", type=str, required=True, help="Model name (e.g., llama_8b, qwen_32b)")
-parser.add_argument("-lf", "--layer-fraction", type=float, default=None, help="Layer fraction for injection (default: auto-select from exp21)")
-parser.add_argument("-s", "--strength", type=float, default=None, help="Steering strength (default: auto-select from exp21)")
+parser.add_argument("-lf", "--layer-fraction", type=float, default=None, help="Layer fraction for injection (default: auto-select from experiment 02 (steering evaluation))")
+parser.add_argument("-s", "--strength", type=float, default=None, help="Steering strength (default: auto-select from experiment 02 (steering evaluation))")
 parser.add_argument("-pl", "--patch-layers", nargs='+', type=int, default=None, help="Layers to patch (default: all layers > steering layer)")
 parser.add_argument("-pc", "--patch-components", nargs='+', choices=['attn', 'mlp', 'both'], default=['both'], help="Components to patch (default: both)")
 parser.add_argument("-nt", "--n-trials", type=int, default=30, help="Number of trials per component (default: 30)")
-parser.add_argument("-c", "--concepts", nargs='+', default=None, help="Concepts to test (default: top concepts from exp21)")
+parser.add_argument("-c", "--concepts", nargs='+', default=None, help="Concepts to test (default: top concepts from experiment 02 (steering evaluation))")
 parser.add_argument("-mc", "--max-concepts", type=int, default=10, help="Max concepts to test (default: 50, but keep in mind patching is expensive)")
 parser.add_argument("-mt", "--max-tokens", type=int, default=100, help="Max tokens per response (default: 100)")
 parser.add_argument("-t", "--temperature", type=float, default=1.0, help="Sampling temperature (default: 1.0)")
-parser.add_argument("-o", "--output-dir", type=str, default=None, help="Output directory (default: analysis/exp9_activation_patching/{model})")
+parser.add_argument("-o", "--output-dir", type=str, default=None, help="Output directory (default: analysis/06_activation_patching/{model})")
 parser.add_argument("-sh", "--skip-heads", action="store_true", help="Skip individual attention head patching (faster)")
-parser.add_argument("--no-auto-select", action="store_true", help="Disable auto-selection of best config from exp21")
+parser.add_argument("--no-auto-select", action="store_true", help="Disable auto-selection of best config from experiment 02 (steering evaluation)")
 parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results instead of resuming (default: False)")
 args = parser.parse_args()
 
@@ -398,7 +398,7 @@ def compute_detection_accuracy(responses: List[str], judge: LLMJudge, concepts: 
     Compute introspection accuracy using LLM judge.
 
     Uses combined metric: P(detected AND correctly_identified | injection)
-    This is the same metric as exp1's introspection score.
+    This is the same metric as experiment 01 (concept injection)'s introspection score.
 
     Args:
         responses: List of model responses
@@ -416,7 +416,7 @@ def compute_detection_accuracy(responses: List[str], judge: LLMJudge, concepts: 
     evaluated_results = judge.evaluate_batch(results, prompts)
 
     # Use combined metric: detected AND correctly identified
-    # This prevents confabulation and matches exp1 methodology
+    # This prevents confabulation and matches experiment 01 (concept injection) methodology
     introspection_successes = []
     for eval_dict in evaluated_results:
         if 'evaluations' in eval_dict:
@@ -432,9 +432,9 @@ def compute_detection_accuracy(responses: List[str], judge: LLMJudge, concepts: 
     return np.mean(introspection_successes), evaluated_results
 
 
-def load_best_exp21_config(model_name: str) -> Tuple[float, float, List[str]]:
+def load_best_steering_config(model_name: str) -> Tuple[float, float, List[str]]:
     """
-    Load exp21 results and find the best configuration.
+    Load experiment 02 (steering evaluation) results and find the best configuration.
 
     Args:
         model_name: Model name
@@ -442,15 +442,15 @@ def load_best_exp21_config(model_name: str) -> Tuple[float, float, List[str]]:
     Returns:
         Tuple of (best_layer_fraction, best_strength, best_concepts)
     """
-    exp21_dir = Path("analysis") / "exp21_backwards_steering" / model_name
+    steering_dir = Path("analysis") / "02_steering_evaluation" / model_name
 
-    if not exp21_dir.exists():
-        print(f"Warning: exp21 results not found at {exp21_dir}")
+    if not steering_dir.exists():
+        print(f"Warning: experiment 02 (steering evaluation) results not found at {steering_dir}")
         print("Using default config: layer_fraction=0.7, strength=4.0")
         return 0.7, 4.0, []
 
-    # Scan all config directories (following exp27 pattern)
-    config_dirs = [d for d in exp21_dir.iterdir() if d.is_dir() and d.name.startswith("layer_")]
+    # Scan all config directories (following prior work pattern)
+    config_dirs = [d for d in steering_dir.iterdir() if d.is_dir() and d.name.startswith("layer_")]
     best_score = -1
     best_config_data = None
 
@@ -492,11 +492,11 @@ def load_best_exp21_config(model_name: str) -> Tuple[float, float, List[str]]:
             continue
 
     if best_config_data is None:
-        print(f"Warning: No valid exp21 configs found")
+        print(f"Warning: No valid experiment 02 (steering evaluation) configs found")
         print("Using default config: layer_fraction=0.7, strength=4.0")
         return 0.7, 4.0, []
 
-    print(f"\n✓ Auto-selected best configuration from exp21:")
+    print(f"\n✓ Auto-selected best configuration from experiment 02 (steering evaluation):")
     print(f"  Layer fraction: {best_config_data['layer_fraction']:.4f}")
     print(f"  Strength: {best_config_data['strength']:.1f}")
     print(f"  Combined detection+ID rate: {best_config_data['combined_rate']:.1%}")
@@ -539,9 +539,9 @@ def load_best_exp21_config(model_name: str) -> Tuple[float, float, List[str]]:
     return best_config_data['layer_fraction'], best_config_data['strength'], best_concepts
 
 
-def load_best_exp1_config(model_name: str) -> Tuple[float, float, List[str]]:
+def load_best_injection_config(model_name: str) -> Tuple[float, float, List[str]]:
     """
-    Load exp1 results and find the best configuration.
+    Load experiment 01 (concept injection) results and find the best configuration.
 
     Args:
         model_name: Model name
@@ -549,16 +549,16 @@ def load_best_exp1_config(model_name: str) -> Tuple[float, float, List[str]]:
     Returns:
         Tuple of (best_layer_fraction, best_strength, best_concepts)
     """
-    exp1_dir = Path("analysis") / "exp1_injected_thoughts" / model_name
+    injection_dir = Path("analysis") / "01_concept_injection" / model_name
 
-    if not exp1_dir.exists():
-        print(f"Warning: exp1 results not found at {exp1_dir}")
+    if not injection_dir.exists():
+        print(f"Warning: experiment 01 (concept injection) results not found at {injection_dir}")
         print("Using default config: layer_fraction=0.7, strength=4.0")
         return 0.7, 4.0, []
 
     # Find all config directories
     configs = []
-    for config_dir in exp1_dir.iterdir():
+    for config_dir in injection_dir.iterdir():
         if not config_dir.is_dir():
             continue
         if not (config_dir / "results.json").exists():
@@ -586,7 +586,7 @@ def load_best_exp1_config(model_name: str) -> Tuple[float, float, List[str]]:
             continue
 
     if not configs:
-        print(f"Warning: No valid exp1 configs found")
+        print(f"Warning: No valid experiment 01 (concept injection) configs found")
         print("Using default config: layer_fraction=0.7, strength=4.0")
         return 0.7, 4.0, []
 
@@ -594,7 +594,7 @@ def load_best_exp1_config(model_name: str) -> Tuple[float, float, List[str]]:
     configs.sort(key=lambda x: x['combined_rate'], reverse=True)
     best_config = configs[0]
 
-    print(f"\nAuto-selected best configuration from exp1:")
+    print(f"\nAuto-selected best configuration from experiment 01 (concept injection):")
     print(f"  Layer fraction: {best_config['layer_fraction']:.2f}")
     print(f"  Strength: {best_config['strength']:.1f}")
     print(f"  Combined detection+ID rate: {best_config['combined_rate']:.1%}")
@@ -868,7 +868,7 @@ def main():
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
-        output_dir = Path("analysis") / "exp9_activation_patching" / args.model
+        output_dir = Path("analysis") / "06_activation_patching" / args.model
 
     output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -876,10 +876,10 @@ def main():
     print("EXPERIMENT 9: ACTIVATION PATCHING FOR INTROSPECTION CIRCUITS")
     print("=" * 80 + "\n")
 
-    # Auto-select best config from exp21 if not specified
+    # Auto-select best config from experiment 02 (steering evaluation) if not specified
     best_concepts_ordered = []
     if not args.no_auto_select and (args.layer_fraction is None or args.strength is None):
-        layer_fraction, strength, best_concepts_ordered = load_best_exp21_config(args.model)
+        layer_fraction, strength, best_concepts_ordered = load_best_steering_config(args.model)
 
         # Override with auto-selected values if not specified
         if args.layer_fraction is None:
@@ -914,10 +914,10 @@ def main():
     # e.g., 0.70 -> "layer_0.70"
     layer_subdir = f"layer_{args.layer_fraction:.2f}"
 
-    vectors_dir = Path("analysis") / "exp1_injected_thoughts" / args.model / "vectors" / layer_subdir
+    vectors_dir = Path("analysis") / "01_concept_injection" / args.model / "vectors" / layer_subdir
     if not vectors_dir.exists():
         # Try without layer subdirectory (backward compatibility)
-        vectors_dir = Path("analysis") / "exp1_injected_thoughts" / args.model / "vectors"
+        vectors_dir = Path("analysis") / "01_concept_injection" / args.model / "vectors"
         if not vectors_dir.exists():
             print(f"Error: Vectors directory not found: {vectors_dir}")
             return
@@ -925,7 +925,7 @@ def main():
     else:
         print(f"Loading vectors from: {vectors_dir}")
 
-    # Use concepts from args if specified, otherwise use best concepts from exp1
+    # Use concepts from args if specified, otherwise use best concepts from experiment 01 (concept injection)
     if args.concepts:
         concepts_to_test = args.concepts[:args.max_concepts]
     elif best_concepts_ordered:

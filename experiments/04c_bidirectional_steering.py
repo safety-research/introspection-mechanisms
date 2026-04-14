@@ -48,10 +48,10 @@ from eval_utils import LLMJudge, batch_evaluate
 # ==============================================================================
 
 DEFAULT_MODEL = "gemma3_27b"
-DEFAULT_EXP4_DIR = "analysis/exp4_vector_geometry"
-DEFAULT_EXP4_DECOMP_DIR = "analysis/exp4_vector_decomposition"
-DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
-DEFAULT_OUTPUT_DIR = "analysis/exp45_subspace_sae_analysis"
+DEFAULT_GEOMETRY_DIR = "analysis/04b_vector_geometry"
+DEFAULT_GEOMETRY_DECOMP_DIR = "analysis/04b_vector_decomposition"
+DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
+DEFAULT_OUTPUT_DIR = "analysis/04c_bidirectional_steering"
 
 DEFAULT_LAYER = 37
 DEFAULT_STRENGTH = 4.0
@@ -136,19 +136,19 @@ def save_checkpoint(checkpoint_path: Path, completed_items: List[str], status: s
 # ==============================================================================
 
 def load_ridge_direction(
-    exp4_decomp_dir: Path,
+    geometry_decomp_dir: Path,
     model_name: str,
     layer: int,
     strength: float,
     metric: str = "detection_rate",
 ) -> torch.Tensor:
-    """Load Ridge direction from exp4_vector_decomposition."""
-    ridge_path = exp4_decomp_dir / model_name / f"layer_{layer}_strength_{strength}" / metric / "primary_axis.pt"
+    """Load Ridge direction from 04b_vector_decomposition."""
+    ridge_path = geometry_decomp_dir / model_name / f"layer_{layer}_strength_{strength}" / metric / "primary_axis.pt"
 
     if not ridge_path.exists():
         raise FileNotFoundError(
             f"Ridge direction not found at {ridge_path}. "
-            f"Run exp4_vector_decomposition.py first."
+            f"Run 04b_vector_decomposition.py first."
         )
 
     w_ridge = torch.load(ridge_path, map_location='cpu', weights_only=True)
@@ -171,12 +171,12 @@ def parse_args():
     # Model and paths
     parser.add_argument("-m", "--model", type=str, default=DEFAULT_MODEL,
                         help=f"Model name (default: {DEFAULT_MODEL})")
-    parser.add_argument("--exp4-dir", type=str, default=DEFAULT_EXP4_DIR,
-                        help="Path to exp4 results")
-    parser.add_argument("--exp21-dir", type=str, default=DEFAULT_EXP21_DIR,
-                        help="Path to exp21 results")
-    parser.add_argument("--exp4-decomp-dir", type=str, default=DEFAULT_EXP4_DECOMP_DIR,
-                        help="Path to exp4_vector_decomposition results (for ridge direction)")
+    parser.add_argument("--geometry-dir", type=str, default=DEFAULT_GEOMETRY_DIR,
+                        help="Path to experiment 04b (vector geometry) results")
+    parser.add_argument("--steering-dir", type=str, default=DEFAULT_STEERING_DIR,
+                        help="Path to experiment 02 (steering evaluation) results")
+    parser.add_argument("--geometry-decomp-dir", type=str, default=DEFAULT_GEOMETRY_DECOMP_DIR,
+                        help="Path to 04b_vector_decomposition results (for ridge direction)")
     parser.add_argument("-od", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                         help="Output directory")
 
@@ -280,16 +280,16 @@ def load_concept_vectors(vectors_dir: Path, concepts: List[str]) -> Dict[str, to
     return vectors
 
 
-def load_partition_from_exp4(
-    exp4_dir: Path,
+def load_geometry_partition(
+    geometry_dir: Path,
     model_name: str,
     layer: int,
     strength: float,
     balanced: bool = False,
     metric: str = "detection_rate"
 ) -> Tuple[List[str], List[str], dict]:
-    """Load success/failure partition from exp4's subspace_analysis.json or balanced_partition.json."""
-    layer_strength_dir = exp4_dir / model_name / f"layer_{layer}_strength_{strength}" / metric
+    """Load success/failure partition from experiment 04b (vector geometry)'s subspace_analysis.json or balanced_partition.json."""
+    layer_strength_dir = geometry_dir / model_name / f"layer_{layer}_strength_{strength}" / metric
 
     if balanced:
         partition_path = layer_strength_dir / "balanced_partition.json"
@@ -313,7 +313,7 @@ def load_partition_from_exp4(
     else:
         subspace_path = layer_strength_dir / "subspace_analysis.json"
         if not subspace_path.exists():
-            raise FileNotFoundError(f"Could not find exp4 subspace analysis at {subspace_path}")
+            raise FileNotFoundError(f"Could not find experiment 04b (vector geometry) subspace analysis at {subspace_path}")
 
         with open(subspace_path, 'r') as f:
             data = json.load(f)
@@ -333,15 +333,15 @@ def load_partition_from_exp4(
 
 
 def load_baseline_detection_rates(
-    exp21_dir: Path,
+    steering_dir: Path,
     model_name: str,
     layer: int,
     strength: float,
     success_concepts: List[str],
     failure_concepts: List[str]
 ) -> Tuple[float, float, Dict[str, float]]:
-    """Load baseline detection rates from exp21 steering experiment results."""
-    results_dir = exp21_dir / model_name
+    """Load baseline detection rates from experiment 02 (steering evaluation) steering experiment results."""
+    results_dir = steering_dir / model_name
     layer_results_path = results_dir / f"layer_{layer}_strength_{strength}" / "results.json"
 
     if layer_results_path.exists():
@@ -349,7 +349,7 @@ def load_baseline_detection_rates(
     else:
         results_files = list(results_dir.glob("layer_*/results.json"))
         if not results_files:
-            print(f"  Warning: No exp21 results found in {results_dir}, using default baselines")
+            print(f"  Warning: No experiment 02 (steering evaluation) results found in {results_dir}, using default baselines")
             return 0.8, 0.2, {}
         results_path = results_files[0]
 
@@ -1839,8 +1839,8 @@ def main():
     torch.manual_seed(args.seed)
 
     # Setup base paths
-    exp4_dir = Path(args.exp4_dir)
-    exp21_dir = Path(args.exp21_dir)
+    geometry_dir = Path(args.geometry_dir)
+    steering_dir = Path(args.steering_dir)
 
     # Create all layer/strength combinations
     layer_strength_configs = [(layer, strength) for layer in args.layers for strength in args.strengths]
@@ -1877,8 +1877,8 @@ def main():
         print("\n[1] Loading data...")
 
         # Load partition
-        success_concepts, failure_concepts, partition_metadata = load_partition_from_exp4(
-            exp4_dir, args.model, args.layer, args.strength, balanced=args.balanced_partition
+        success_concepts, failure_concepts, partition_metadata = load_geometry_partition(
+            geometry_dir, args.model, args.layer, args.strength, balanced=args.balanced_partition
         )
         if args.balanced_partition:
             print(f"  Loaded BALANCED partition: {len(success_concepts)} success, {len(failure_concepts)} failure")
@@ -1886,11 +1886,11 @@ def main():
             print(f"  Loaded partition: {len(success_concepts)} success, {len(failure_concepts)} failure")
 
         # Load concept vectors
-        vectors_dir = exp21_dir / args.model / "vectors" / f"layer_{args.layer}"
+        vectors_dir = steering_dir / args.model / "vectors" / f"layer_{args.layer}"
         if not vectors_dir.exists():
             alt_paths = [
-                exp21_dir / args.model / "vectors",
-                exp21_dir / args.model / f"layer_{args.layer}_strength_{args.strength}" / "vectors",
+                steering_dir / args.model / "vectors",
+                steering_dir / args.model / f"layer_{args.layer}_strength_{args.strength}" / "vectors",
             ]
             for alt in alt_paths:
                 if alt.exists():
@@ -1921,9 +1921,9 @@ def main():
 
         # Compute pairing direction
         if args.pairing_direction == "ridge":
-            exp4_decomp_dir = Path(args.exp4_decomp_dir)
+            geometry_decomp_dir = Path(args.geometry_decomp_dir)
             try:
-                pairing_direction = load_ridge_direction(exp4_decomp_dir, args.model, layer, strength)
+                pairing_direction = load_ridge_direction(geometry_decomp_dir, args.model, layer, strength)
                 print(f"  Using RIDGE direction for pairing")
             except FileNotFoundError as e:
                 print(f"  WARNING: {e}")
@@ -2025,7 +2025,7 @@ def main():
 
         # Normal execution
         D_S, D_F, per_concept_rates = load_baseline_detection_rates(
-            exp21_dir, args.model, args.layer, args.strength, success_concepts, failure_concepts
+            steering_dir, args.model, args.layer, args.strength, success_concepts, failure_concepts
         )
 
         # Filter concepts by baseline detection rate thresholds

@@ -100,7 +100,7 @@ DEFAULT_N_TRIALS = 30  # DEPRECATED: kept for backward compatibility
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_BATCH_SIZE = 300
-DEFAULT_OUTPUT_DIR = "analysis/exp21_backwards_steering"
+DEFAULT_OUTPUT_DIR = "analysis/02_steering_evaluation"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_MODEL = "gemma3_27b"
@@ -277,7 +277,7 @@ def parse_args():
     parser.add_argument("-nlj", "--no-llm-judge", action="store_true", help="Disable LLM judge evaluation (enabled by default, requires OPENAI_API_KEY in .env)")
     parser.add_argument("-ij", "--incremental-judge", action="store_true", help="Run LLM judge after each concept (saves progress, more resilient to interruption)")
     parser.add_argument("-nsv", "--no-save-vectors", action="store_true", help="Don't save concept vectors")
-    parser.add_argument("-uvf", "--use-vectors-from", type=str, default=None, help="Path to existing vectors folder to copy instead of extracting (e.g., analysis/exp21_more_concepts_steering/gemma3_27b/vectors). Vectors will be copied to the new output folder. This avoids 'double ablation' when running abliterated models.")
+    parser.add_argument("-uvf", "--use-vectors-from", type=str, default=None, help="Path to existing vectors folder to copy instead of extracting (e.g., analysis/02b_steering_500_concepts/gemma3_27b/vectors). Vectors will be copied to the new output folder. This avoids 'double ablation' when running abliterated models.")
     parser.add_argument("-ow", "--overwrite", action="store_true", help="Overwrite existing results (default: False, resume from where left off)")
     parser.add_argument("-rej", "--reevaluate-judge", action="store_true", help="Re-evaluate existing results with LLM judge (does not regenerate responses)")
     parser.add_argument("-hl", "--highlight-layer-idx", type=int, default=None, help="Highlight a specific layer index with a red dot in the layer sweep plot (e.g., 40)")
@@ -1349,7 +1349,7 @@ def extract_example_transcripts(base_output_dir: Path, models: List[str]):
 
 def generate_missing_vectors(
     model_name: str,
-    output_dir: Path = Path("analysis/exp21_backwards_steering"),
+    output_dir: Path = Path("analysis/02_steering_evaluation"),
     baseline_words: List[str] = None,
     extraction_method: str = "baseline",
     device: str = "cuda",

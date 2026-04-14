@@ -1,7 +1,7 @@
 """
 Exp40 Pretraining Alignment Analysis
 
-Goal: Test if the introspection direction (mean-diff from exp40) aligns with
+Goal: Test if the introspection direction (mean-diff from experiment 04d/04e (direction analysis)) aligns with
 "factual vs uncertain" content in pretraining data.
 
 Hypothesis: If the direction encodes "factual/answerable" vs "uncertain/careful handling",
@@ -13,15 +13,15 @@ This tests the "dual-use" hypothesis: the direction wasn't designed for introspe
 that happens to predict introspection success.
 
 Method:
-1. Load the mean-diff direction from exp40 results
+1. Load the mean-diff direction from experiment 04d/04e (direction analysis) results
 2. Stream pretraining text from HuggingFace datasets
 3. For each text, compute activations at the steering layer
 4. Project activations onto the introspection direction
 5. Collect and analyze examples with highest/lowest projections
 
 Usage:
-    python exp40_pretraining_alignment.py --model gemma3_27b --n-samples 1000
-    python exp40_pretraining_alignment.py --model gemma3_27b --n-samples 5000 --dataset fineweb
+    python 04g_pretraining_alignment.py --model gemma3_27b --n-samples 1000
+    python 04g_pretraining_alignment.py --model gemma3_27b --n-samples 5000 --dataset fineweb
 """
 
 import argparse
@@ -124,13 +124,13 @@ MODEL_CONFIGS = {
 }
 
 
-def load_introspection_direction(exp40_dir: Path, model_name: str) -> torch.Tensor:
-    """Load the mean-diff introspection direction from exp40 results."""
+def load_introspection_direction(direction_dir: Path, model_name: str) -> torch.Tensor:
+    """Load the mean-diff introspection direction from experiment 04d/04e (direction analysis) results."""
     # Try multiple possible locations
     possible_paths = [
-        exp40_dir / model_name / "mean_diff_direction.pt",
-        exp40_dir / model_name / "introspection_direction.pt",
-        Path(f"analysis/exp40_mean_delta_swap/{model_name}/mean_diff_direction.pt"),
+        direction_dir / model_name / "mean_diff_direction.pt",
+        direction_dir / model_name / "introspection_direction.pt",
+        Path(f"analysis/04d_mean_diff_swap/{model_name}/mean_diff_direction.pt"),
     ]
 
     for path in possible_paths:
@@ -141,9 +141,9 @@ def load_introspection_direction(exp40_dir: Path, model_name: str) -> torch.Tens
             return direction
 
     # If not found, try to compute from mu_succ and mu_fail
-    results_path = exp40_dir / model_name / "results.json"
+    results_path = direction_dir / model_name / "results.json"
     if not results_path.exists():
-        results_path = Path(f"analysis/exp40_mean_delta_swap/{model_name}/results.json")
+        results_path = Path(f"analysis/04d_mean_diff_swap/{model_name}/results.json")
 
     if results_path.exists():
         # Load the saved group means and compute direction
@@ -160,7 +160,7 @@ def load_introspection_direction(exp40_dir: Path, model_name: str) -> torch.Tens
 
     raise FileNotFoundError(
         f"Could not find introspection direction. Tried: {possible_paths}\n"
-        f"Please run exp40_mean_delta_swap.py first to generate the direction."
+        f"Please run 04d_mean_diff_swap.py first to generate the direction."
     )
 
 
@@ -606,7 +606,7 @@ def run_analysis(
     pooling: str = "mean",
     seed: int = 42,
     output_dir: Optional[Path] = None,
-    exp40_dir: Optional[Path] = None,
+    direction_dir: Optional[Path] = None,
     n_top_examples: int = 30,
 ):
     """
@@ -624,15 +624,15 @@ def run_analysis(
 
     # Set up paths
     if output_dir is None:
-        output_dir = Path(f"analysis/exp40_pretraining_alignment/{model_name}")
+        output_dir = Path(f"analysis/04g_pretraining_alignment/{model_name}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if exp40_dir is None:
-        exp40_dir = Path("analysis/exp40_mean_delta_swap")
+    if direction_dir is None:
+        direction_dir = Path("analysis/04d_mean_diff_swap")
 
     # Step 1: Load introspection direction
     print("\n[1/5] Loading introspection direction...")
-    direction = load_introspection_direction(exp40_dir, model_name)
+    direction = load_introspection_direction(direction_dir, model_name)
 
     # Step 2: Load dataset samples
     print("\n[2/5] Loading dataset samples...")
@@ -800,15 +800,15 @@ def main():
                        help="Random seed")
     parser.add_argument("--output-dir", type=str, default=None,
                        help="Output directory")
-    parser.add_argument("--exp40-dir", type=str, default=None,
-                       help="Directory with exp40 results")
+    parser.add_argument("--direction-dir", type=str, default=None,
+                       help="Directory with experiment 04d/04e (direction analysis) results")
     parser.add_argument("--n-top", type=int, default=30,
                        help="Number of top/bottom examples to save")
 
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir) if args.output_dir else None
-    exp40_dir = Path(args.exp40_dir) if args.exp40_dir else None
+    direction_dir = Path(args.direction_dir) if args.direction_dir else None
 
     run_analysis(
         model_name=args.model,
@@ -818,7 +818,7 @@ def main():
         pooling=args.pooling,
         seed=args.seed,
         output_dir=output_dir,
-        exp40_dir=exp40_dir,
+        direction_dir=direction_dir,
         n_top_examples=args.n_top,
     )
 

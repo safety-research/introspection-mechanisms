@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 50: Aggregation Analysis — Geometry Panel (Section 4.3)
+Transcoder Feature Analysis: Aggregation Analysis — Geometry Panel (Section 4.3)
 
 Two analyses for the paper's geometry panel:
 
@@ -40,8 +40,8 @@ warnings.filterwarnings('ignore')
 # Configuration
 # =============================================================================
 
-CACHED_ACTIVATIONS_BASE = Path("analysis/exp50_cached_activations")
-OUTPUT_BASE = Path("analysis/exp50_aggregation_analysis")
+CACHED_ACTIVATIONS_BASE = Path("analysis/08_cached_activations")
+OUTPUT_BASE = Path("analysis/04h_aggregation_analysis")
 
 DEFAULT_STEERING_LAYER = 37
 DEFAULT_STEERING_STRENGTH = 4.0
@@ -54,21 +54,21 @@ DEFAULT_TRANSCODER_WIDTH = "262k"
 # Path helpers
 # =============================================================================
 
-def get_exp4_base(steering_layer: int, steering_strength: float) -> Path:
-    return Path(f"analysis/exp4_vector_geometry/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
+def get_geometry_base(steering_layer: int, steering_strength: float) -> Path:
+    return Path(f"analysis/04b_vector_geometry/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
 
 
-def get_exp21_base(steering_layer: int, steering_strength: float) -> Path:
-    return Path(f"analysis/exp21_more_concepts_steering/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
+def get_steering_base(steering_layer: int, steering_strength: float) -> Path:
+    return Path(f"analysis/02b_steering_500_concepts/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
 
 
-def get_exp40_base(steering_layer: int, steering_strength: float) -> Path:
-    return Path(f"analysis/exp40_mean_delta_swap/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
+def get_direction_base(steering_layer: int, steering_strength: float) -> Path:
+    return Path(f"analysis/04d_mean_diff_swap/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
 
 
 def get_concept_vectors_dir(steering_layer: int) -> Path:
-    """Get the directory containing concept steering vectors from exp21."""
-    return Path(f"analysis/exp21_more_concepts_steering/gemma3_27b/vectors/layer_{steering_layer}")
+    """Get the directory containing concept steering vectors from experiment 02 (steering evaluation)."""
+    return Path(f"analysis/02b_steering_500_concepts/gemma3_27b/vectors/layer_{steering_layer}")
 
 
 def get_width_prefix(transcoder_width: str) -> str:
@@ -97,7 +97,7 @@ def load_concept_vectors(
     steering_layer: int = 37,
 ) -> Tuple[np.ndarray, List[str]]:
     """
-    Load concept steering vectors from exp21.
+    Load concept steering vectors from experiment 02 (steering evaluation).
 
     Returns:
         X_vectors: Matrix of shape (n_concepts, vector_dim) with steering vectors as rows
@@ -131,13 +131,13 @@ def load_concept_mean_diff_projections(
     Load concept vectors and compute their projections onto the mean-diff direction.
 
     Uses:
-    - Mean-diff direction from exp40 (residual stream space)
-    - Concept vectors from exp21 (residual stream space)
+    - Mean-diff direction from experiment 04d/04e (direction analysis) (residual stream space)
+    - Concept vectors from experiment 02 (steering evaluation) (residual stream space)
 
     Returns dict mapping concept name -> projection value (scalar).
     """
-    exp40_base = get_exp40_base(steering_layer, steering_strength)
-    mean_diff_path = exp40_base / "mean_diff_direction.pt"
+    direction_base = get_direction_base(steering_layer, steering_strength)
+    mean_diff_path = direction_base / "mean_diff_direction.pt"
 
     if not mean_diff_path.exists():
         print(f"  WARNING: Mean-diff direction not found: {mean_diff_path}")
@@ -146,7 +146,7 @@ def load_concept_mean_diff_projections(
     mean_diff = torch.load(mean_diff_path).float()
     mean_diff = mean_diff / mean_diff.norm()
 
-    vectors_dir = Path(f"analysis/exp21_more_concepts_steering/gemma3_27b/vectors/layer_{steering_layer}")
+    vectors_dir = Path(f"analysis/02b_steering_500_concepts/gemma3_27b/vectors/layer_{steering_layer}")
 
     if not vectors_dir.exists():
         print(f"  WARNING: Concept vectors directory not found: {vectors_dir}")
@@ -582,7 +582,7 @@ def _plot_logit_attr_ridge(
             proj = pca_model.transform(V_normed)
             pc1 = pca_model.components_[0]
 
-            det_base = Path(f"analysis/exp4_vector_geometry/gemma3_27b/layer_{steering_layer}_strength_4.0/detection_rate")
+            det_base = Path(f"analysis/04b_vector_geometry/gemma3_27b/layer_{steering_layer}_strength_4.0/detection_rate")
             _norm = lambda v: v / (np.linalg.norm(v) + 1e-10)
             directions = {}
             for dname, fname in [('d_Md', 'introspection_direction_mean_diff.pt'),
@@ -591,7 +591,7 @@ def _plot_logit_attr_ridge(
                 if dp.exists():
                     directions[dname] = _norm(torch.load(dp, map_location='cpu').float().numpy().flatten())
 
-            ref_path = Path("analysis/exp39_remove_refusal_direction/gemma3_27b/refusal_directions.pt")
+            ref_path = Path("analysis/03d_refusal_abliteration/gemma3_27b/refusal_directions.pt")
             if ref_path.exists():
                 ref_all = torch.load(ref_path, map_location='cpu').float().numpy()
                 directions['d_ref'] = _norm(ref_all[steering_layer])
@@ -674,11 +674,11 @@ def _plot_logit_attr_ridge(
             plt.close(fig)
             print(f"  Saved: {pca_path}")
 
-            exp4_pca_dir = det_base / "plots"
-            exp4_pca_dir.mkdir(parents=True, exist_ok=True)
+            geometry_pca_dir = det_base / "plots"
+            geometry_pca_dir.mkdir(parents=True, exist_ok=True)
             import shutil
-            shutil.copy2(pca_path, exp4_pca_dir / "pca.png")
-            print(f"  Copied: {exp4_pca_dir / 'pca.png'}")
+            shutil.copy2(pca_path, geometry_pca_dir / "pca.png")
+            print(f"  Copied: {geometry_pca_dir / 'pca.png'}")
 
             _pca_data = dict(proj=proj, pca_model=pca_model, dr_vals=dr_vals,
                              V_concepts=V_concepts, cos_lines=cos_lines,
@@ -768,7 +768,7 @@ def _plot_logit_attr_ridge(
             try:
                 steering_layer_c = results.get('steering_layer', 37)
                 steering_strength_c = results.get('steering_strength', 4.0)
-                md_dir_path_c = get_exp40_base(steering_layer_c, steering_strength_c) / "mean_diff_direction.pt"
+                md_dir_path_c = get_direction_base(steering_layer_c, steering_strength_c) / "mean_diff_direction.pt"
                 if md_dir_path_c.exists():
                     md_dir_c = torch.load(md_dir_path_c, map_location='cpu').float().flatten()
                     md_dir_c = md_dir_c / (md_dir_c.norm() + 1e-10)
@@ -944,18 +944,18 @@ def run_logit_attr_ridge_analysis(
     # Step 1: Load concept partition & detection rates
     # =========================================================================
     print("\n--- Step 1: Load concept partition & detection rates ---")
-    exp4_base = get_exp4_base(steering_layer, steering_strength)
-    with open(exp4_base / "detection_rate" / "subspace_analysis.json") as f:
+    geometry_base = get_geometry_base(steering_layer, steering_strength)
+    with open(geometry_base / "detection_rate" / "subspace_analysis.json") as f:
         partition_data = json.load(f)
     success_concepts = set(partition_data['success_concepts'])
     failure_concepts = set(partition_data['failure_concepts'])
 
-    # Load detection rates from exp21
-    exp21_base = get_exp21_base(steering_layer, steering_strength)
-    with open(exp21_base / "results.json") as f:
-        exp21_data = json.load(f)
+    # Load detection rates from experiment 02 (steering evaluation)
+    steering_base = get_steering_base(steering_layer, steering_strength)
+    with open(steering_base / "results.json") as f:
+        steering_data = json.load(f)
     concept_stats = defaultdict(lambda: {'detected': 0, 'total': 0})
-    for item in exp21_data['results']:
+    for item in steering_data['results']:
         if item.get('trial_type') == 'injection' and item.get('concept') is not None:
             c = item['concept']
             concept_stats[c]['total'] += 1
@@ -1008,7 +1008,7 @@ def run_logit_attr_ridge_analysis(
     elif target_mode in ('p_det', 'yes_no'):
         attr_key = 'attributions_pdet' if target_mode == 'p_det' else 'attributions_yesno'
         target_label = f"net {'p_det' if target_mode == 'p_det' else 'yes/no'} attribution"
-        bulk_dir = Path(f"analysis/exp50_causal_pathway/{wp}{transcoder_l0}/bulk_logit_attribution_L{steering_layer}_{token_mode}")
+        bulk_dir = Path(f"analysis/09b_causal_pathway/{wp}{transcoder_l0}/bulk_logit_attribution_L{steering_layer}_{token_mode}")
         concept_attr_dir = bulk_dir / "concept_attributions"
         print(f"  Loading net attributions ({attr_key}) from {concept_attr_dir}")
 
@@ -1115,7 +1115,7 @@ def run_logit_attr_ridge_analysis(
     # Step 5: Load bulk attribution ranking (norm-product)
     # =========================================================================
     print("\n--- Step 5: Load bulk attribution ranking ---")
-    bulk_dir = Path(f"analysis/exp50_causal_pathway/{wp}{transcoder_l0}/bulk_logit_attribution_L{steering_layer}_{token_mode}")
+    bulk_dir = Path(f"analysis/09b_causal_pathway/{wp}{transcoder_l0}/bulk_logit_attribution_L{steering_layer}_{token_mode}")
     with open(bulk_dir / "aggregated_attribution.json") as f:
         agg_data = json.load(f)
     print(f"  {agg_data['n_concepts']} concepts, {agg_data['n_unique_features']} unique features")

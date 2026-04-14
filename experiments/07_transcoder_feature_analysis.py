@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 50: Detector Feature Analysis
+Transcoder Feature Analysis: Detector Feature Analysis
 
 Analyzes transcoder features one layer after the injection site to identify
 gate features and evidence carrier features for anomaly detection.
@@ -24,7 +24,7 @@ Paper figures generated:
 - gate-example-1 (activation vs steering strength for gate features)
 - evidence-feature-1, evidence-feature-2 (evidence carrier examples)
 
-Output: analysis/exp50_detector_analysis/L{steering_layer}/
+Output: analysis/07_transcoder_feature_analysis/L{steering_layer}/
 """
 
 import argparse
@@ -50,13 +50,13 @@ from tqdm import tqdm
 # Configuration
 # =============================================================================
 
-EXP50_CACHE_BASE = Path("analysis/exp50_cached_activations")
-OUTPUT_BASE = Path("analysis/exp50_detector_analysis")
+EXP50_CACHE_BASE = Path("analysis/08_cached_activations")
+OUTPUT_BASE = Path("analysis/07_transcoder_feature_analysis")
 TRANSCODERS_BASE = Path("transcoders")
-EXP4_GEOMETRY_BASE = Path("analysis/exp4_vector_geometry/gemma3_27b")
+GEOMETRY_BASE = Path("analysis/04b_vector_geometry/gemma3_27b")
 
 # Steering layer -> Detector layer mapping
-DETECTOR_LAYERS = {35: 36, 38: 39, 44: 45}
+DETECTOR_LAYERS = {29: 30, 35: 36, 37: 38, 38: 39, 44: 45}
 
 # All available strengths
 ALL_STRENGTHS = [-8.0, -4.0, -2.0, -1.0, 1.0, 2.0, 4.0, 8.0]
@@ -65,7 +65,7 @@ ALL_STRENGTHS = [-8.0, -4.0, -2.0, -1.0, 1.0, 2.0, 4.0, 8.0]
 DEFAULT_MONOTONICITY_THRESHOLD = 0.7
 
 # In/out tokens cache
-INOUT_TOKENS_CACHE = Path("analysis/exp50_cached_inout/small_inout_tokens.json")
+INOUT_TOKENS_CACHE = Path("analysis/07_cached_inout/small_inout_tokens.json")
 
 # Default strength for loading concept detection rates
 DEFAULT_DETECTION_RATE_STRENGTH = 4.0
@@ -76,12 +76,12 @@ DEFAULT_DETECTION_RATE_STRENGTH = 4.0
 # =============================================================================
 
 parser = argparse.ArgumentParser(
-    description="Experiment 50: Detector Feature Analysis",
+    description="Transcoder Feature Analysis: Detector Feature Analysis",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument(
     "-sl", "--steering-layers",
-    type=int, nargs="+", default=[35, 38, 44],
+    type=int, nargs="+", default=[37],
     help="Steering layer(s) to analyze"
 )
 parser.add_argument(
@@ -224,7 +224,7 @@ def load_feature_labels(detector_layer: int, transcoder_l0: str) -> Dict[int, st
     """Load feature labels for a transcoder layer from gemma-scope-2."""
     labels = {}
 
-    gemma_scope_path = Path("/workspace/anthropic-fellows/gemma-scope-2/feature_labels")
+    gemma_scope_path = Path("gemma-scope-2/feature_labels")
     label_filename = f"gemma_scope_2_27b_transcoder_all_layer{detector_layer}_16k_{transcoder_l0}_labels.json"
     label_path = gemma_scope_path / label_filename
 
@@ -250,12 +250,12 @@ def load_feature_labels(detector_layer: int, transcoder_l0: str) -> Dict[int, st
     return labels
 
 
-def load_exp4_partition(
+def load_geometry_partition(
     steering_layer: int,
     strength: float = DEFAULT_DETECTION_RATE_STRENGTH,
 ) -> Tuple[List[str], List[str]]:
     """
-    Load success/failure concept partition from exp4 subspace analysis.
+    Load success/failure concept partition from experiment 04b (vector geometry) subspace analysis.
 
     Returns:
         Tuple of (success_concepts, failure_concepts) lists
@@ -263,20 +263,20 @@ def load_exp4_partition(
     strengths_to_try = [strength, 4.0, 8.0, 2.0]
 
     for s in strengths_to_try:
-        partition_path = EXP4_GEOMETRY_BASE / f"layer_{steering_layer}_strength_{s}" / "subspace_analysis.json"
+        partition_path = GEOMETRY_BASE / f"layer_{steering_layer}_strength_{s}" / "detection_rate" / "subspace_analysis.json"
         if partition_path.exists():
             try:
                 with open(partition_path) as f:
                     data = json.load(f)
                 success = data.get('success_concepts', [])
                 failure = data.get('failure_concepts', [])
-                print(f"  Loaded exp4 partition from {partition_path}")
+                print(f"  Loaded experiment 04b (vector geometry) partition from {partition_path}")
                 print(f"    Success concepts: {len(success)}, Failure concepts: {len(failure)}")
                 return success, failure
             except Exception as e:
                 print(f"  WARNING: Failed to load partition from {partition_path}: {e}")
 
-    print(f"  WARNING: No exp4 partition found for L{steering_layer}")
+    print(f"  WARNING: No experiment 04b (vector geometry) partition found for L{steering_layer}")
     return [], []
 
 
@@ -285,7 +285,7 @@ def load_concept_detection_rates(
     strength: float = DEFAULT_DETECTION_RATE_STRENGTH,
 ) -> Dict[str, float]:
     """
-    Load per-concept detection rates from exp4 geometry analysis.
+    Load per-concept detection rates from experiment 04b (vector geometry) geometry analysis.
 
     Returns:
         Dict mapping concept name -> detection rate (0.0 to 1.0)
@@ -294,7 +294,7 @@ def load_concept_detection_rates(
     strengths_to_try = [strength, 4.0, 8.0, 2.0, 1.0]
 
     for s in strengths_to_try:
-        geometry_path = EXP4_GEOMETRY_BASE / f"layer_{steering_layer}_strength_{s}" / "geometric_analysis.csv"
+        geometry_path = GEOMETRY_BASE / f"layer_{steering_layer}_strength_{s}" / "geometric_analysis.csv"
         if geometry_path.exists():
             try:
                 df = pd.read_csv(geometry_path)
@@ -1395,9 +1395,9 @@ def run_detector_analysis(
     print("\n  Loading concept detection rates...")
     concept_detection_rates = load_concept_detection_rates(steering_layer)
 
-    # Load exp4 success/failure partition
-    print("\n  Loading exp4 partition...")
-    success_concepts, failure_concepts = load_exp4_partition(steering_layer)
+    # Load experiment 04b (vector geometry) success/failure partition
+    print("\n  Loading experiment 04b (vector geometry) partition...")
+    success_concepts, failure_concepts = load_geometry_partition(steering_layer)
 
     tracker = PlottedFeatureTracker(feature_labels)
 

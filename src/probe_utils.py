@@ -1013,7 +1013,7 @@ def construct_introspection_prompt(trial_number: int = 1) -> List[Dict[str, str]
     """
     Construct the standard introspection prompt messages.
 
-    This matches the format used in exp1 and exp21.
+    This matches the format used in experiment 01 (concept injection) and experiment 02 (steering evaluation).
 
     Args:
         trial_number: Trial number to include in the prompt
@@ -1052,7 +1052,7 @@ def extract_label_from_result(result: Dict) -> Tuple[bool, str]:
         - Everything else (control trials, missed detections, wrong identifications)
 
     Args:
-        result: Trial result dictionary from exp1/exp21
+        result: Trial result dictionary from experiment 01 (concept injection)/experiment 02 (steering evaluation)
 
     Returns:
         Tuple of (is_positive, label_reason)

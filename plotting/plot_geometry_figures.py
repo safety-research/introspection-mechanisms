@@ -29,7 +29,7 @@ plt.rcParams.update({
     'text.usetex': False,
 })
 
-ANALYSIS_ROOT = Path("/workspace/anthropic-fellows/introspection/analysis/exp45_subspace_sae_analysis")
+ANALYSIS_ROOT = Path("analysis/04c_bidirectional_steering")
 
 ALPHAS = [-2.0, -1.75, -1.5, -1.25, -1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
 

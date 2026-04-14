@@ -64,8 +64,8 @@ from vector_utils import get_baseline_words
 _is_base_model = False
 
 DEFAULT_MODEL = "gemma3_27b"
-DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
-DEFAULT_OUTPUT_DIR = "analysis/exp59_attention_final"
+DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
+DEFAULT_OUTPUT_DIR = "analysis/13_steering_attribution"
 DEFAULT_LAYER = 37
 DEFAULT_STRENGTH = 4.0
 DEFAULT_N_CONCEPTS = 500
@@ -91,8 +91,8 @@ def parse_args():
         description="Experiment 59: Steering Attribution Analysis"
     )
     parser.add_argument("-m", "--model", type=str, default=DEFAULT_MODEL)
-    parser.add_argument("--vectors-model", type=str, default=None, help="Model name for loading concepts/vectors from exp21 (default: same as --model). Useful for running abliterated models with base model vectors.")
-    parser.add_argument("--exp21-dir", type=str, default=DEFAULT_EXP21_DIR)
+    parser.add_argument("--vectors-model", type=str, default=None, help="Model name for loading concepts/vectors from experiment 02 (steering evaluation) (default: same as --model). Useful for running abliterated models with base model vectors.")
+    parser.add_argument("--steering-dir", type=str, default=DEFAULT_STEERING_DIR)
     parser.add_argument("-od", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("-l", "--layer", type=int, default=DEFAULT_LAYER)
     parser.add_argument("-s", "--strength", type=float, default=DEFAULT_STRENGTH)
@@ -124,14 +124,14 @@ def parse_args():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_successful_concepts(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     steering_layer: int = DEFAULT_LAYER,
     strength: float = 4.0,
     min_detections: int = 0,
 ) -> List[str]:
-    """Load concepts from exp21 (all by default, min_detections=0)."""
-    base_dir = Path(exp21_dir) / model_name
+    """Load concepts from experiment 02 (steering evaluation) (all by default, min_detections=0)."""
+    base_dir = Path(steering_dir) / model_name
 
     # Try exact match first (e.g., layer_38_strength_4.0)
     exact_dir = base_dir / f"layer_{steering_layer}_strength_{strength}"
@@ -186,13 +186,13 @@ def load_successful_concepts(
 
 
 def load_concept_vectors(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     concepts: List[str],
     steering_layer: int = DEFAULT_LAYER,
 ) -> Dict[str, torch.Tensor]:
-    """Load concept vectors from exp21."""
-    base_vectors_dir = Path(exp21_dir) / model_name / "vectors"
+    """Load concept vectors from experiment 02 (steering evaluation)."""
+    base_vectors_dir = Path(steering_dir) / model_name / "vectors"
 
     # Find best layer directory (match by actual layer number)
     layer_dirs = sorted(base_vectors_dir.glob("layer_*"))
@@ -218,18 +218,18 @@ def load_concept_vectors(
 def load_concept_groups(
     steering_layer: int = DEFAULT_LAYER,
     strength: float = DEFAULT_STRENGTH,
-    exp4_dir: str = "analysis/exp4_vector_geometry",
+    geometry_dir: str = "analysis/04b_vector_geometry",
     model_name: str = DEFAULT_MODEL,
 ) -> Tuple[List[str], List[str]]:
-    """Load success/failure concept groups from exp4 subspace analysis.
+    """Load success/failure concept groups from experiment 04b (vector geometry) subspace analysis.
 
     Returns:
         (success_concepts, failure_concepts) -- lists of concept names.
     """
-    base = Path(exp4_dir) / model_name / f"layer_{steering_layer}_strength_{strength}"
+    base = Path(geometry_dir) / model_name / f"layer_{steering_layer}_strength_{strength}"
     sa_path = base / "subspace_analysis.json"
     if not sa_path.exists():
-        print(f"  Warning: exp4 subspace analysis not found at {sa_path}")
+        print(f"  Warning: experiment 04b (vector geometry) subspace analysis not found at {sa_path}")
         return [], []
     with open(sa_path) as f:
         data = json.load(f)
@@ -444,7 +444,7 @@ def get_yes_no_token_ids(tokenizer) -> Tuple[List[int], List[int]]:
 
 
 def build_discriminative_token_set(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     concepts: List[str],
     tokenizer,
@@ -454,20 +454,20 @@ def build_discriminative_token_set(
     no_threshold: float = 0.2,
     min_total: int = 20,
 ) -> Tuple[List[int], List[int]]:
-    """Build global discriminative YES/NO token sets from exp21 first-token data.
+    """Build global discriminative YES/NO token sets from experiment 02 (steering evaluation) first-token data.
 
-    For each first BPE token across all exp21 responses, computes:
+    For each first BPE token across all experiment 02 (steering evaluation) responses, computes:
         P(detected | first_token = t) = n_detected / (n_detected + n_not_detected)
 
     Tokens with P > yes_threshold become YES tokens; tokens with P < no_threshold
     become NO tokens. Only tokens with >= min_total total occurrences are considered.
 
-    Falls back to get_yes_no_token_ids() if exp21 data is unavailable.
+    Falls back to get_yes_no_token_ids() if experiment 02 (steering evaluation) data is unavailable.
     """
     default_yes, default_no = get_yes_no_token_ids(tokenizer)
 
-    # Load exp21 results
-    base_dir = Path(exp21_dir) / model_name
+    # Load experiment 02 (steering evaluation) results
+    base_dir = Path(steering_dir) / model_name
     exact_dir = base_dir / f"layer_{steering_layer}_strength_{strength}"
     results_path = exact_dir / "results.json" if exact_dir.exists() else None
 
@@ -488,13 +488,13 @@ def build_discriminative_token_set(
                     continue
 
     if results_path is None or not results_path.exists():
-        print("  Warning: No exp21 results found for discriminative tokens, using defaults")
+        print("  Warning: No experiment 02 (steering evaluation) results found for discriminative tokens, using defaults")
         return default_yes, default_no
 
     with open(results_path) as f:
         data = json.load(f)
 
-    # Count first-token occurrences across ALL exp21 concepts (global statistics)
+    # Count first-token occurrences across ALL experiment 02 (steering evaluation) concepts (global statistics)
     global_det = Counter()
     global_nodet = Counter()
 
@@ -552,16 +552,16 @@ def build_discriminative_token_set(
 
 
 def build_detection_weights(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     tokenizer,
     steering_layer: int = DEFAULT_LAYER,
     strength: float = 4.0,
     min_total: int = 5,
 ) -> Tuple[List[int], torch.Tensor]:
-    """Build per-token detection probability weights from exp21 first-token data.
+    """Build per-token detection probability weights from experiment 02 (steering evaluation) first-token data.
 
-    For each first BPE token observed in exp21 responses, computes:
+    For each first BPE token observed in experiment 02 (steering evaluation) responses, computes:
         w(t) = P(detected | first_token = t)
 
     The detection log-odds is then computed via the law of total probability:
@@ -570,10 +570,10 @@ def build_detection_weights(
 
     Returns:
         (scored_ids, weights): token IDs and their P(detected) weights.
-        Falls back to simple YES=1/NO=0 weights if exp21 data is unavailable.
+        Falls back to simple YES=1/NO=0 weights if experiment 02 (steering evaluation) data is unavailable.
     """
-    # Load exp21 results
-    base_dir = Path(exp21_dir) / model_name
+    # Load experiment 02 (steering evaluation) results
+    base_dir = Path(steering_dir) / model_name
     exact_dir = base_dir / f"layer_{steering_layer}_strength_{strength}"
     results_path = exact_dir / "results.json" if exact_dir.exists() else None
 
@@ -597,7 +597,7 @@ def build_detection_weights(
         if _is_base_model:
             print("  Base model: using default YES/NO bundle for detection weights")
         else:
-            print("  Warning: No exp21 results found for detection weights, using fallback")
+            print("  Warning: No experiment 02 (steering evaluation) results found for detection weights, using fallback")
         yes_ids, no_ids = get_yes_no_token_ids(tokenizer)
         scored_ids = yes_ids + no_ids
         weights = torch.tensor([1.0] * len(yes_ids) + [0.0] * len(no_ids))
@@ -1044,7 +1044,7 @@ def compute_component_gradient_attribution(
     n_trials: int = 10,
     device: str = "cuda",
     verbose: bool = False,
-    exp21_dir: str = DEFAULT_EXP21_DIR,
+    steering_dir: str = DEFAULT_STEERING_DIR,
     model_name: str = DEFAULT_MODEL,
     completed_concepts: Optional[Set[str]] = None,
     batch_size: int = GRADIENT_BATCH_SIZE,
@@ -1077,7 +1077,7 @@ def compute_component_gradient_attribution(
 
     # Build token sets for all targets
     yes_ids, no_ids = build_discriminative_token_set(
-        exp21_dir, model_name, list(concept_vectors.keys()), tokenizer,
+        steering_dir, model_name, list(concept_vectors.keys()), tokenizer,
         steering_layer=steering_layer, strength=steering_strength,
     )
     yes_default, no_default = get_yes_no_token_ids(tokenizer)
@@ -1570,7 +1570,7 @@ def run_section_a(
     verbose: bool = False,
     max_tokens: int = 100,
     temperature: float = 1.0,
-    exp21_dir: str = DEFAULT_EXP21_DIR,
+    steering_dir: str = DEFAULT_STEERING_DIR,
     model_name: str = DEFAULT_MODEL,
     ablation_mode: str = "all-positions",
 ) -> Dict:
@@ -1599,9 +1599,9 @@ def run_section_a(
     results_path = section_dir / "logit_gaps.json"
     multi_results_path = section_dir / "multi_metric_gaps.json"
 
-    # Build detection weight vector from exp21 first-token data
+    # Build detection weight vector from experiment 02 (steering evaluation) first-token data
     detection_ids, detection_weights = build_detection_weights(
-        exp21_dir, model_name, tokenizer,
+        steering_dir, model_name, tokenizer,
         steering_layer=steering_layer, strength=strength,
     )
 
@@ -2220,7 +2220,7 @@ def run_section_b(
     device: str = "cuda",
     overwrite: bool = False,
     verbose: bool = False,
-    exp21_dir: str = DEFAULT_EXP21_DIR,
+    steering_dir: str = DEFAULT_STEERING_DIR,
     model_name: str = DEFAULT_MODEL,
 ) -> Dict:
     """Section B: Per-layer component gradient attribution (attn vs MLP).
@@ -2260,7 +2260,7 @@ def run_section_b(
         model_wrapper, tokenizer, concept_vectors,
         steering_layer, strength, n_trials=n_trials,
         device=device, verbose=verbose,
-        exp21_dir=exp21_dir, model_name=model_name,
+        steering_dir=steering_dir, model_name=model_name,
         completed_concepts=completed_concepts,
     )
 
@@ -2524,7 +2524,7 @@ def run_section_d(
     device: str = "cuda",
     overwrite: bool = False,
     verbose: bool = False,
-    exp21_dir: str = DEFAULT_EXP21_DIR,
+    steering_dir: str = DEFAULT_STEERING_DIR,
     model_name: str = DEFAULT_MODEL,
 ) -> Dict:
     """Section D: Attention routing analysis."""
@@ -2542,7 +2542,7 @@ def run_section_d(
     n_heads = model_wrapper.n_heads
     target_layers = list(range(steering_layer + 1, n_layers))
     yes_ids, no_ids = build_discriminative_token_set(
-        exp21_dir, model_name, list(concept_vectors.keys()), tokenizer,
+        steering_dir, model_name, list(concept_vectors.keys()), tokenizer,
         steering_layer=steering_layer, strength=strength,
     )
 
@@ -3401,10 +3401,10 @@ def main():
     with open(output_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    # Load concepts (from vectors_model's exp21 data)
+    # Load concepts (from vectors_model's experiment 02 (steering evaluation) data)
     print("Loading concepts...")
     successful = load_successful_concepts(
-        args.exp21_dir, vectors_model, args.layer, args.strength,
+        args.steering_dir, vectors_model, args.layer, args.strength,
     )
     print(f"  Found {len(successful)} successful concepts")
 
@@ -3422,11 +3422,11 @@ def main():
     if not args.model.endswith("_pt"):
         print("Loading concept vectors...")
         concept_vectors = load_concept_vectors(
-            args.exp21_dir, vectors_model, concepts, steering_layer=args.layer,
+            args.steering_dir, vectors_model, concepts, steering_layer=args.layer,
         )
         print(f"  Loaded {len(concept_vectors)} vectors")
         if not concept_vectors:
-            print("ERROR: No concept vectors loaded. Check exp21 directory.")
+            print("ERROR: No concept vectors loaded. Check experiment 02 (steering evaluation) directory.")
             sys.exit(1)
 
     if args.plots_only:
@@ -3538,7 +3538,7 @@ def main():
             output_dir, device=args.device,
             batch_size=args.batch_size,
             overwrite=args.overwrite, verbose=args.verbose,
-            exp21_dir=args.exp21_dir, model_name=vectors_model,
+            steering_dir=args.steering_dir, model_name=vectors_model,
             ablation_mode=args.ablation_mode,
         )
         gc.collect()
@@ -3550,7 +3550,7 @@ def main():
             args.layer, args.strength, args.n_trials,
             output_dir, device=args.device,
             overwrite=args.overwrite, verbose=args.verbose,
-            exp21_dir=args.exp21_dir, model_name=vectors_model,
+            steering_dir=args.steering_dir, model_name=vectors_model,
         )
         gc.collect()
         torch.cuda.empty_cache()
@@ -3561,7 +3561,7 @@ def main():
             args.layer, args.strength, args.n_attribution_trials,
             output_dir, device=args.device,
             overwrite=args.overwrite, verbose=args.verbose,
-            exp21_dir=args.exp21_dir, model_name=vectors_model,
+            steering_dir=args.steering_dir, model_name=vectors_model,
         )
         gc.collect()
         torch.cuda.empty_cache()

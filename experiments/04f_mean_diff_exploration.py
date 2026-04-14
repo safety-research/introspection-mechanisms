@@ -11,9 +11,9 @@ Three Experiments:
 3. Sensitive Topic Analysis - Does d_success vary by topic sensitivity?
 
 Usage:
-    python exp40_mean_diff_direction_exploration.py --model gemma3_27b
-    python exp40_mean_diff_direction_exploration.py --model gemma3_27b --exp1-only
-    python exp40_mean_diff_direction_exploration.py --model gemma3_27b --exp3-only
+    python 04f_mean_diff_exploration.py --model gemma3_27b
+    python 04f_mean_diff_exploration.py --model gemma3_27b --experiment 01 (concept injection)-only
+    python 04f_mean_diff_exploration.py --model gemma3_27b --exp3-only
 """
 
 import argparse
@@ -42,7 +42,7 @@ from vector_utils import DEFAULT_BASELINE_WORDS
 DEFAULT_MODEL = "gemma3_27b"
 DEFAULT_LAYER = 35
 DEFAULT_STRENGTH = 4.0
-DEFAULT_OUTPUT_DIR = Path("analysis/exp40_mean_diff_direction_exploration")
+DEFAULT_OUTPUT_DIR = Path("analysis/04f_mean_diff_exploration")
 
 MODEL_NAMES = {
     "gemma3_27b": "google/gemma-3-27b-it",
@@ -65,12 +65,12 @@ def compute_baseline_mean(
     verbose: bool = True,
 ) -> torch.Tensor:
     """
-    Compute and cache the baseline mean activation using the same methodology as exp21.
+    Compute and cache the baseline mean activation using the same methodology as experiment 02 (steering evaluation).
 
     The baseline mean is the mean activation at the last token position for prompts
     of the form "Tell me about {word}" for 100 random baseline words.
 
-    This is critical: concept vectors in exp21 are computed as:
+    This is critical: concept vectors in experiment 02 (steering evaluation) are computed as:
         concept_vector = activation("Tell me about X") - baseline_mean
 
     So when projecting natural prompts onto the mean-diff direction, we must
@@ -86,7 +86,7 @@ def compute_baseline_mean(
     if verbose:
         print(f"Computing baseline mean from {n_baseline_words} words...")
 
-    # Format prompts the same way as exp21
+    # Format prompts the same way as experiment 02 (steering evaluation)
     baseline_prompts = []
     for word in DEFAULT_BASELINE_WORDS[:n_baseline_words]:
         messages = [{"role": "user", "content": f"Tell me about {word}"}]
@@ -517,7 +517,7 @@ def run_comprehensive_topic_analysis(
     """
     Comprehensive topic projection analysis across all categories.
 
-    Uses the same methodology as exp21 concept vector extraction:
+    Uses the same methodology as experiment 02 (steering evaluation) concept vector extraction:
     - Extract activation at last token position
     - Subtract baseline mean before projecting
 
@@ -1176,34 +1176,34 @@ def load_d_success(
     model_name: str,
     layer_index: int = 35,
     strength: float = 4.0,
-    exp40_dir: Path = Path("analysis/exp40_mean_delta_swap")
+    direction_dir: Path = Path("analysis/04d_mean_diff_swap")
 ) -> torch.Tensor:
-    """Load or compute d_success from exp4 or exp40 results.
+    """Load or compute d_success from experiment 04b (vector geometry) or experiment 04d/04e (direction analysis) results.
 
     Args:
         model_name: Model short name (e.g., 'gemma3_27b')
         layer_index: Layer index (e.g., 35, 38, 44). Default: 35.
         strength: Steering strength (e.g., 1.0, 2.0, 4.0, 8.0). Default: 4.0.
-        exp40_dir: Path to exp40 results directory.
+        direction_dir: Path to experiment 04d/04e (direction analysis) results directory.
     """
     config_name = f"layer_{layer_index}_strength_{strength}"
 
-    # Try to load from exp4 mean_diff direction (new structure with layer/strength subdirectory)
-    mean_diff_path = Path(f"analysis/exp4_vector_geometry/{model_name}/{config_name}/detection_rate/introspection_direction_mean_diff.pt")
+    # Try to load from experiment 04b (vector geometry) mean_diff direction (new structure with layer/strength subdirectory)
+    mean_diff_path = Path(f"analysis/04b_vector_geometry/{model_name}/{config_name}/detection_rate/introspection_direction_mean_diff.pt")
     if mean_diff_path.exists():
         print(f"Loading d_success from {mean_diff_path}")
         d_success = torch.load(mean_diff_path, weights_only=True)
         return d_success
 
     # Try legacy path (no subdirectory)
-    legacy_mean_diff_path = Path(f"analysis/exp4_vector_geometry/{model_name}/introspection_direction_mean_diff.pt")
+    legacy_mean_diff_path = Path(f"analysis/04b_vector_geometry/{model_name}/introspection_direction_mean_diff.pt")
     if legacy_mean_diff_path.exists():
         print(f"Loading d_success from legacy path: {legacy_mean_diff_path}")
         d_success = torch.load(legacy_mean_diff_path, weights_only=True)
         return d_success
 
-    # Try to load from saved vectors (exp40)
-    vectors_path = exp40_dir / model_name / "mean_median_vectors.pt"
+    # Try to load from saved vectors (experiment 04d/04e (direction analysis))
+    vectors_path = direction_dir / model_name / "mean_median_vectors.pt"
     if vectors_path.exists():
         print(f"Loading d_success from {vectors_path}")
         vectors = torch.load(vectors_path, weights_only=True)
@@ -1213,10 +1213,10 @@ def load_d_success(
         return d_success
 
     # Try to compute from subspace analysis (new structure)
-    subspace_path = Path(f"analysis/exp4_vector_geometry/{model_name}/{config_name}/detection_rate/subspace_analysis.json")
+    subspace_path = Path(f"analysis/04b_vector_geometry/{model_name}/{config_name}/detection_rate/subspace_analysis.json")
     if not subspace_path.exists():
         # Try legacy path
-        subspace_path = Path(f"analysis/exp4_vector_geometry/{model_name}/subspace_analysis.json")
+        subspace_path = Path(f"analysis/04b_vector_geometry/{model_name}/subspace_analysis.json")
 
     if subspace_path.exists():
         print(f"Computing d_success from {subspace_path}")
@@ -1227,11 +1227,11 @@ def load_d_success(
         failure_concepts = subspace_data.get('failure_concepts', [])
 
         # Need to load concept vectors (new structure with layer index subdirectory)
-        vectors_dir = Path(f"analysis/exp21_more_concepts_steering/{model_name}/vectors/layer_{layer_index}")
+        vectors_dir = Path(f"analysis/02b_steering_500_concepts/{model_name}/vectors/layer_{layer_index}")
 
         if not vectors_dir.exists():
             # Try alternative paths
-            vectors_dir = Path(f"analysis/exp21_activation_steering/{model_name}/concept_vectors")
+            vectors_dir = Path(f"analysis/02_activation_steering/{model_name}/concept_vectors")
             if not vectors_dir.exists():
                 vectors_dir = Path(f"debug/{model_name}/concept_vectors")
 
@@ -1257,7 +1257,7 @@ def load_d_success(
     raise FileNotFoundError(
         f"Could not find or compute d_success for {model_name}\n"
         f"  Looked for: {mean_diff_path}\n"
-        f"  Please run exp4_vector_geometry.py first with layer={layer_index}, strength={strength}"
+        f"  Please run 04b_vector_geometry.py first with layer={layer_index}, strength={strength}"
     )
 
 
@@ -1273,15 +1273,15 @@ def compute_d_success_from_vectors(
     verbose: bool = True,
 ) -> torch.Tensor:
     """
-    Compute d_success (mean-diff direction) from concept vectors and exp21 results.
+    Compute d_success (mean-diff direction) from concept vectors and experiment 02 (steering evaluation) results.
 
     Loads vectors from the specified subdirectory and success/failure labels
-    from exp21 results, then computes mean(success) - mean(failure).
+    from experiment 02 (steering evaluation) results, then computes mean(success) - mean(failure).
     """
-    exp21_model_dir = Path("analysis/exp21_more_concepts_steering") / model_name
-    vectors_dir = exp21_model_dir / vectors_subdir / f"layer_{layer_index}"
+    steering_model_dir = Path("analysis/02b_steering_500_concepts") / model_name
+    vectors_dir = steering_model_dir / vectors_subdir / f"layer_{layer_index}"
     config_name = f"layer_{layer_index}_strength_{strength}"
-    results_path = exp21_model_dir / config_name / "results.json"
+    results_path = steering_model_dir / config_name / "results.json"
 
     if verbose:
         print(f"  Vectors: {vectors_dir}")
@@ -1298,7 +1298,7 @@ def compute_d_success_from_vectors(
     if verbose:
         print(f"  Loaded {len(vectors)} concept vectors")
 
-    # Load exp21 results to get success/failure labels
+    # Load experiment 02 (steering evaluation) results to get success/failure labels
     if not results_path.exists():
         raise FileNotFoundError(f"Results not found: {results_path}")
 

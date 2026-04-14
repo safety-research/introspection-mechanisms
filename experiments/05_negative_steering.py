@@ -6,7 +6,7 @@ Test whether models can detect when safety/alignment-related behavior directions
 are SUBTRACTED (negative steering) from their residual stream. This probes
 tamper-awareness when removing undesired tendencies (refusal, sycophancy, etc.).
 
-Key changes vs exp1/exp21:
+Key changes vs experiment 01 (concept injection)/experiment 02 (steering evaluation):
 - "Concepts" are behavior directions (refusal, sycophancy, etc.)
 - Steering is NEGATIVE (subtract direction) and applied at multiple layers
 - Steering is applied at all token positions from a specific newline in the trial prompt
@@ -17,6 +17,7 @@ Key changes vs exp1/exp21:
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import argparse
 import json
@@ -33,7 +34,7 @@ from tqdm import tqdm
 
 from model_utils import load_model
 from eval_utils import LLMJudge, batch_evaluate, compute_detection_and_identification_metrics, save_evaluation_results
-from exp56_prompts import list_directions, get_direction_prompt_sets
+from steering_prompts import list_directions, get_direction_prompt_sets
 
 matplotlib.use("Agg")
 
@@ -45,7 +46,7 @@ DEFAULT_SAMPLES_PER_TRIAL = 10
 DEFAULT_CONTROL_SAMPLES_PER_TRIAL = 50
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMPERATURE = 1.0
-DEFAULT_OUTPUT_DIR = "analysis/exp56_negative_steering"
+DEFAULT_OUTPUT_DIR = "analysis/05_negative_steering"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_N_PROMPTS_PER_DIRECTION = 64
@@ -161,7 +162,7 @@ def extract_activation_at_last_input_token(
 ) -> torch.Tensor:
     """
     Extract activation at the last INPUT token (default: -2) using generation hidden states.
-    This matches exp39's method: output_hidden_states=True with max_new_tokens=1.
+    This matches experiment 03d (abliteration)'s method: output_hidden_states=True with max_new_tokens=1.
     """
     inputs = model.tokenizer(formatted_prompt, return_tensors="pt", add_special_tokens=False).to(model.device)
     with torch.no_grad():

@@ -69,10 +69,10 @@ def parse_args():
                         help="Steering layer")
     parser.add_argument("-s", "--strength", type=float, default=4.0,
                         help="Steering strength")
-    parser.add_argument("--exp21-dir", type=str,
-                        default="analysis/exp21_more_concepts_steering")
+    parser.add_argument("--steering-dir", type=str,
+                        default="analysis/02b_steering_500_concepts")
     parser.add_argument("-od", "--output-dir", type=str,
-                        default="analysis/exp51_head_investigation")
+                        default="analysis/12_head_investigation")
     parser.add_argument("-d", "--device", type=str, default="cuda")
     parser.add_argument("-dt", "--dtype", type=str, default="bfloat16")
     parser.add_argument("-q", "--quantization", type=str, default=None)
@@ -93,26 +93,26 @@ def parse_args():
 def load_concept_classification(
     model_name: str, layer: int, strength: float
 ) -> Tuple[List[str], List[str]]:
-    """Load success/failure concept classification from exp4 subspace analysis."""
+    """Load success/failure concept classification from experiment 04b (vector geometry) subspace analysis."""
     layer_strength_dir = f"layer_{layer}_strength_{strength}"
-    exp4_file = (
-        Path("analysis/exp4_vector_geometry")
+    geometry_file = (
+        Path("analysis/04b_vector_geometry")
         / model_name / layer_strength_dir / "subspace_analysis.json"
     )
 
-    if not exp4_file.exists():
+    if not geometry_file.exists():
         raise FileNotFoundError(
-            f"Concept classification not found at {exp4_file}\n"
-            f"Please ensure exp4 subspace analysis exists for "
+            f"Concept classification not found at {geometry_file}\n"
+            f"Please ensure experiment 04b (vector geometry) subspace analysis exists for "
             f"layer {layer}, strength {strength}."
         )
 
-    with open(exp4_file) as f:
+    with open(geometry_file) as f:
         data = json.load(f)
 
     success = data.get("success_concepts", [])
     failure = data.get("failure_concepts", [])
-    print(f"Loaded concept classification from exp4: "
+    print(f"Loaded concept classification from experiment 04b (vector geometry): "
           f"{len(success)} success, {len(failure)} failure")
     return success, failure
 
@@ -139,14 +139,14 @@ def filter_concepts_by_partition(
 
 
 def load_concept_vectors(
-    exp21_dir: str,
+    steering_dir: str,
     model_name: str,
     concepts: Optional[List[str]] = None,
     n_sample: int = 30,
     layer: int = 37,
 ) -> Dict[str, torch.Tensor]:
-    """Load concept steering vectors from exp21."""
-    vectors_dir = Path(exp21_dir) / model_name / "vectors" / f"layer_{layer}"
+    """Load concept steering vectors from experiment 02 (steering evaluation)."""
+    vectors_dir = Path(steering_dir) / model_name / "vectors" / f"layer_{layer}"
 
     if not vectors_dir.exists():
         raise FileNotFoundError(
@@ -1072,7 +1072,7 @@ def run_experiment(args, output_dir: Path):
         # Load and filter concept vectors
         print("\nLoading concept vectors...")
         concept_vectors = load_concept_vectors(
-            args.exp21_dir, args.model, args.concepts,
+            args.steering_dir, args.model, args.concepts,
             n_sample=args.n_concepts, layer=args.layer,
         )
         print(f"Loaded {len(concept_vectors)} concepts")

@@ -11,7 +11,7 @@ vectors, systematically varying what structural properties are preserved vs dest
 Conditions:
 
 GROUP A — Null Hypothesis Tests:
-  real_concepts:          Original concept vectors from exp21 (positive control)
+  real_concepts:          Original concept vectors from experiment 02 (steering evaluation) (positive control)
   no_steering:            No steering applied (negative control / false positive rate)
   isotropic_noise:        randn(d) scaled to mean norm of success concept vectors
   per_concept_norm_matched: For each success concept, randn(d) with that concept's exact norm
@@ -36,8 +36,8 @@ Key Analyses:
   5. Statistical tests with Bonferroni correction
 
 Dependencies:
-  - exp4_vector_geometry.py → success/failure partition
-  - exp21_more_concepts_steering → concept vectors + baseline results
+  - 04b_vector_geometry.py → success/failure partition
+  - 02b_steering_500_concepts → concept vectors + baseline results
 
 Usage:
     python 04_geometry_analysis.py -m gemma3_27b
@@ -82,9 +82,9 @@ from eval_utils import LLMJudge, batch_evaluate
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_MODEL = "gemma3_27b"
-DEFAULT_EXP4_DIR = "analysis/exp4_vector_geometry"
-DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
-DEFAULT_OUTPUT_DIR = "analysis/exp58_gaussian_concepts"
+DEFAULT_GEOMETRY_DIR = "analysis/04b_vector_geometry"
+DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
+DEFAULT_OUTPUT_DIR = "analysis/04_geometry_analysis"
 DEFAULT_LAYER = 38
 DEFAULT_STRENGTH = 4.0
 DEFAULT_N_TRIAL_NUMBERS = 5
@@ -177,8 +177,8 @@ def parse_args():
         description="Experiment 58: Gaussian Concept Vectors — What Makes a Concept Vector Work?"
     )
     parser.add_argument("-m", "--model", type=str, default=DEFAULT_MODEL)
-    parser.add_argument("--exp4-dir", type=str, default=DEFAULT_EXP4_DIR)
-    parser.add_argument("--exp21-dir", type=str, default=DEFAULT_EXP21_DIR)
+    parser.add_argument("--geometry-dir", type=str, default=DEFAULT_GEOMETRY_DIR)
+    parser.add_argument("--steering-dir", type=str, default=DEFAULT_STEERING_DIR)
     parser.add_argument("-od", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("-l", "--layer", type=int, default=DEFAULT_LAYER)
     parser.add_argument("-s", "--strength", type=float, default=DEFAULT_STRENGTH)
@@ -213,7 +213,7 @@ def parse_args():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data loading (follows exp40 patterns)
+# Data loading (follows experiment 04d/04e (direction analysis) patterns)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_concept_vectors(vectors_dir: Path, concepts: List[str]) -> Dict[str, torch.Tensor]:
@@ -231,17 +231,17 @@ def load_concept_vectors(vectors_dir: Path, concepts: List[str]) -> Dict[str, to
     return vectors
 
 
-def load_partition_from_exp4(
-    exp4_dir: Path, model_name: str, layer_idx: int, strength: float
+def load_geometry_partition(
+    geometry_dir: Path, model_name: str, layer_idx: int, strength: float
 ) -> Tuple[List[str], List[str], dict]:
-    """Load success/failure partition from exp4's subspace_analysis.json."""
+    """Load success/failure partition from experiment 04b (vector geometry)'s subspace_analysis.json."""
     config_folder = f"layer_{layer_idx}_strength_{strength}"
-    subspace_path = exp4_dir / model_name / config_folder / "subspace_analysis.json"
+    subspace_path = geometry_dir / model_name / config_folder / "subspace_analysis.json"
     if not subspace_path.exists():
         # Fallback to legacy path
-        subspace_path = exp4_dir / model_name / "subspace_analysis.json"
+        subspace_path = geometry_dir / model_name / "subspace_analysis.json"
     if not subspace_path.exists():
-        raise FileNotFoundError(f"Could not find exp4 subspace analysis at {subspace_path}")
+        raise FileNotFoundError(f"Could not find experiment 04b (vector geometry) subspace analysis at {subspace_path}")
 
     with open(subspace_path, "r") as f:
         data = json.load(f)
@@ -249,7 +249,7 @@ def load_partition_from_exp4(
     success = data.get("success_concepts", [])
     failure = data.get("failure_concepts", [])
     metadata = {
-        "source": "exp4",
+        "source": "experiment 04b (vector geometry)",
         "threshold": data.get("threshold"),
         "metric_used": data.get("metric_used"),
         "lda_accuracy": data.get("lda_classification_accuracy"),
@@ -257,14 +257,14 @@ def load_partition_from_exp4(
     return success, failure, metadata
 
 
-def load_exp21_baseline_per_concept(
-    exp21_dir: Path, model_name: str, layer_idx: int, strength: float
+def load_steering_baseline_per_concept(
+    steering_dir: Path, model_name: str, layer_idx: int, strength: float
 ) -> Dict[str, Dict]:
-    """Load per-concept baseline detection/identification rates from exp21 results."""
+    """Load per-concept baseline detection/identification rates from experiment 02 (steering evaluation) results."""
     config_folder = f"layer_{layer_idx}_strength_{strength}"
-    results_path = exp21_dir / model_name / config_folder / "results.json"
+    results_path = steering_dir / model_name / config_folder / "results.json"
     if not results_path.exists():
-        print(f"  Warning: No exp21 baseline results at {results_path}")
+        print(f"  Warning: No experiment 02 (steering evaluation) baseline results at {results_path}")
         return {}
 
     with open(results_path, "r") as f:
@@ -479,7 +479,7 @@ def generate_norm_sweep_vectors(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Experiment runner (follows exp40 pattern)
+# Experiment runner (follows experiment 04d/04e (direction analysis) pattern)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_steering_experiment(
@@ -1196,8 +1196,8 @@ def main():
     args = parse_args()
 
     # Paths
-    exp4_dir = Path(args.exp4_dir)
-    exp21_dir = Path(args.exp21_dir)
+    geometry_dir = Path(args.geometry_dir)
+    steering_dir = Path(args.steering_dir)
     output_base = Path(args.output_dir)
     layer_idx = args.layer
     strength = args.strength
@@ -1227,9 +1227,9 @@ def main():
         metrics = compute_aggregate_metrics(all_results)
 
         # Load concept vectors for paired analysis
-        vectors_dir = exp21_dir / args.model / "vectors" / f"layer_{layer_idx}"
-        success_concepts, failure_concepts, _ = load_partition_from_exp4(
-            exp4_dir, args.model, layer_idx, strength
+        vectors_dir = steering_dir / args.model / "vectors" / f"layer_{layer_idx}"
+        success_concepts, failure_concepts, _ = load_geometry_partition(
+            geometry_dir, args.model, layer_idx, strength
         )
         vectors = load_concept_vectors(vectors_dir, success_concepts + failure_concepts)
         concept_norms = np.array([v.float().norm().item() for v in vectors.values()])
@@ -1257,15 +1257,15 @@ def main():
     print("=" * 80)
 
     # ── Step 1: Load partition ───────────────────────────────────────
-    print("\n[1/8] Loading concept partition from exp4...")
-    success_concepts, failure_concepts, partition_meta = load_partition_from_exp4(
-        exp4_dir, args.model, layer_idx, strength
+    print("\n[1/8] Loading concept partition from experiment 04b (vector geometry)...")
+    success_concepts, failure_concepts, partition_meta = load_geometry_partition(
+        geometry_dir, args.model, layer_idx, strength
     )
     print(f"  Success: {len(success_concepts)}, Failure: {len(failure_concepts)}")
 
     # ── Step 2: Load concept vectors ─────────────────────────────────
-    print("\n[2/8] Loading concept vectors from exp21...")
-    vectors_dir = exp21_dir / args.model / "vectors" / f"layer_{layer_idx}"
+    print("\n[2/8] Loading concept vectors from experiment 02 (steering evaluation)...")
+    vectors_dir = steering_dir / args.model / "vectors" / f"layer_{layer_idx}"
     if not vectors_dir.exists():
         print(f"Error: Could not find vectors directory at {vectors_dir}")
         return

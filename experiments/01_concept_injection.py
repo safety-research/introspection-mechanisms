@@ -1,5 +1,5 @@
 """
-Experiment 1: Injected Thoughts Detection (Baseline)
+Concept Injection: Injected Thoughts Detection (Baseline)
 
 This is the simplest experiment, replicating the core result from the paper:
 - Extract concept vectors for simple words
@@ -76,7 +76,7 @@ DEFAULT_N_TRIALS = 30
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_BATCH_SIZE = 256
-DEFAULT_OUTPUT_DIR = "analysis/exp1_injected_thoughts"
+DEFAULT_OUTPUT_DIR = "analysis/01_concept_injection"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_MODEL = "llama_8b"
@@ -105,7 +105,7 @@ def filter_messages_for_model(messages: List[Dict], model_name: str) -> List[Dic
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Experiment 1: Injected Thoughts Detection")
+    parser = argparse.ArgumentParser(description="Concept Injection: Injected Thoughts Detection")
     parser.add_argument("-m", "--models", type=str, nargs="+", default=[DEFAULT_MODEL], help="Model name(s) (e.g., llama_8b deepseek_v3 qwen_7b) or 'all' to run on all existing models in output dir")
     parser.add_argument("-c", "--concepts", type=str, nargs="+", default=DEFAULT_TEST_CONCEPTS, help="List of concept words to test")
     parser.add_argument("-nb", "--n-baseline", type=int, default=DEFAULT_N_BASELINE, help="Number of baseline words for vector extraction")
@@ -136,7 +136,7 @@ def run_experiment(
     layer_fraction: float = 0.7,
     strength: float = 8.0,
     n_trials: int = 5,
-    output_dir: Path = Path("analysis/exp1_injected_thoughts"),
+    output_dir: Path = Path("analysis/01_concept_injection"),
     device: str = "cuda",
     dtype: str = "bfloat16",
     quantization: str = None,
@@ -145,7 +145,7 @@ def run_experiment(
     save_vectors: bool = True,
 ):
     """
-    Run Experiment 1: Injected thoughts detection.
+    Run Concept Injection: Injected thoughts detection.
 
     Args:
         model_name: Model identifier
@@ -555,7 +555,7 @@ def run_experiment(
     # Cleanup
     model.cleanup()
 
-    print("\nExperiment 1 complete!")
+    print("\nConcept Injection complete!")
     print(f"Results saved to: {model_output_dir}")
 
     return evaluated_results, metrics

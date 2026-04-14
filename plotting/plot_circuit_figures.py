@@ -2,8 +2,8 @@
 """
 Generate shared multi-concept plots from existing causal pathway analysis data.
 
-Reads from analysis/exp50_causal_pathway/262k_big/ and produces combined plots
-under analysis/exp50_causal_pathway/262k_big/shared/.
+Reads from analysis/09b_causal_pathway/262k_big/ and produces combined plots
+under analysis/09b_causal_pathway/262k_big/shared/.
 
 Each plot is a 2x3 grid showing 6 concepts (those with lowest max n) separately.
 """
@@ -30,14 +30,14 @@ GRAY_550 = "#73726C"
 GRAY_500 = "#87867F"
 YELLOW_600 = "#C77F1A"
 
-# Font settings matching exp50_circuit_ablation_replot.py
+# Font settings matching 09_circuit_ablation_replot.py
 FONT_SCALE = 2.4
 BASE_LABEL_SIZE = 10
 BASE_TICK_SIZE = 9
 BASE_LEGEND_SIZE = 8
 BASE_MARKER_SIZE = 7
 
-BASE_DIR = Path("analysis/exp50_causal_pathway/262k_big")
+BASE_DIR = Path("analysis/09b_causal_pathway/262k_big")
 
 # Concept colors for carrier/suppressor per-concept plots
 CONCEPT_COLORS = [
@@ -82,7 +82,7 @@ def discover_concept_dirs(gate_str: str) -> Dict[str, Path]:
 
 
 def load_ablation_data(concept_dir: Path) -> Optional[Dict]:
-    p = concept_dir / "exp4_ablation_sweep.json"
+    p = concept_dir / "ablation_sweep.json"
     if not p.exists():
         return None
     with open(p) as f:
@@ -99,7 +99,7 @@ def load_gradient_data(concept_dir: Path) -> Optional[Dict]:
 
 def get_feature_title(gate_str: str) -> str:
     try:
-        from exp50_causal_pathway import get_feature_title_from_gemma_scope
+        import importlib; _m = importlib.import_module("09b_causal_pathway"); get_feature_title_from_gemma_scope = _m.get_feature_title_from_gemma_scope
         parts = gate_str.split("_F")
         layer = int(parts[0][1:])
         feat_id = int(parts[1])
@@ -111,7 +111,7 @@ def get_feature_title(gate_str: str) -> str:
 
 def get_concept_detection_rate(concept: str, steering_layer: int = 37) -> Optional[float]:
     try:
-        from exp50_causal_pathway import get_concept_detection_rate as _get_det_rate
+        import importlib; _m = importlib.import_module("09b_causal_pathway"); _get_det_rate = _m.get_concept_detection_rate
         return _get_det_rate(concept, steering_layer)
     except Exception:
         return None
@@ -309,7 +309,7 @@ def plot_shared_ablation(
 def _get_carrier_feature_title(layer: int, feat_id: int) -> str:
     """Get gemma-scope feature title for a transcoder feature."""
     try:
-        from exp50_causal_pathway import get_feature_title_from_gemma_scope
+        import importlib; _m = importlib.import_module("09b_causal_pathway"); get_feature_title_from_gemma_scope = _m.get_feature_title_from_gemma_scope
         title = get_feature_title_from_gemma_scope(layer, feat_id)
         return title if title else "(no title)"
     except Exception:
@@ -373,24 +373,23 @@ def plot_shared_carriers_or_suppressors(
     import textwrap
     import sys
 
-    REPO_ROOT = Path("/workspace/anthropic-fellows")
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
+    EXPERIMENTS_DIR = Path(__file__).resolve().parent.parent / "experiments"
+    if str(EXPERIMENTS_DIR) not in sys.path:
+        sys.path.insert(0, str(EXPERIMENTS_DIR))
 
-    from introspection.exp50_combined_analysis import (
-        discover_cached_strengths,
-        get_control_cache_file,
-        get_layer_matrix_cached,
-    )
+    _fca = importlib.import_module("08_feature_centric_analysis")
+    discover_cached_strengths = _fca.discover_cached_strengths
+    get_control_cache_file = _fca.get_control_cache_file
+    get_layer_matrix_cached = _fca.get_layer_matrix_cached
 
-    import exp50_circuit_ablation
+    import importlib; _circuit = importlib.import_module("09_circuit_analysis")
     TOKEN_MODE = "last_token"
     TARGET_STRENGTHS = [-8, -4, -2, 0, 2, 4, 8]
     XTICKS = [-8, -4, 0, 4, 8]
 
     strengths_map = discover_cached_strengths(
-        37, TOKEN_MODE, exp50_circuit_ablation.TRANSCODER_L0,
-        transcoder_width=exp50_circuit_ablation.TRANSCODER_WIDTH,
+        37, TOKEN_MODE, _circuit.TRANSCODER_L0,
+        transcoder_width=_circuit.TRANSCODER_WIDTH,
     )
 
     gate_name = gate_str.replace("_F", " F")
@@ -458,8 +457,8 @@ def plot_shared_carriers_or_suppressors(
                 cache_file = strengths_map.get(float(strength))
                 if cache_file is None and strength == 0:
                     cache_file = get_control_cache_file(
-                        TOKEN_MODE, exp50_circuit_ablation.TRANSCODER_L0,
-                        transcoder_width=exp50_circuit_ablation.TRANSCODER_WIDTH,
+                        TOKEN_MODE, _circuit.TRANSCODER_L0,
+                        transcoder_width=_circuit.TRANSCODER_WIDTH,
                     )
                 if cache_file is None:
                     continue
