@@ -57,10 +57,11 @@ We investigate the mechanisms underlying introspective awareness in large langua
 │   ├── 10_head_identification.py         # Attention head identification
 │   ├── 11_head_ablation.py              # Attention head ablation
 │   ├── 12_head_investigation.py          # Attention head investigation
-│   ├── 13_steering_attribution.py        # Steering attribution framework (§5, Appendix)
+│   ├── 13_component_attribution.py       # Component-level attribution analysis (§5, Appendix)
 │   ├── 14_trained_steering_vector.py     # Trained steering vector + bias training (§6)
 │   ├── 15_proxy_task_sweep.py            # Proxy task sweep
-│   └── 16_attribution_graph.py          # SAE attribution graph pipeline (§5.3-5.4, Fig 16)
+│   ├── 16_steering_attribution.py       # SAE steering attribution: SA = GA × SG (§5.3-5.4)
+│   └── 17_attribution_graph.py          # Attribution graph construction & visualization (Fig 16)
 ├── plotting/                   # Figure generation scripts
 │   ├── plot_figures.py         # Standalone figure regeneration (metrics, attribution graphs)
 │   ├── plot_circuit_figures.py # Gate/evidence carrier figures
@@ -161,12 +162,12 @@ python experiments/07_transcoder_feature_analysis.py
 python experiments/09_circuit_analysis.py
 ```
 
-### Step 6: Steering Attribution (Appendix)
+### Step 6: Component Attribution (Appendix)
 
-Run the steering attribution framework:
+Run the component-level attribution analysis:
 
 ```bash
-python experiments/13_steering_attribution.py \
+python experiments/13_component_attribution.py \
     -m gemma3_27b --sections A B D
 ```
 
@@ -184,24 +185,31 @@ python experiments/14_trained_steering_vector.py train-bias --model gemma3_27b
 python experiments/14_trained_steering_vector.py evaluate-bias --model gemma3_27b
 ```
 
-### Step 8: SAE Attribution Graph (§5.3-5.4, Figure 16)
+### Step 8: SAE Steering Attribution & Attribution Graph (§5.3-5.4, Figure 16)
 
-Build attribution graphs tracing introspective detection through SAE/transcoder features:
+Extract steering attribution (SA = GA × SG) and build attribution graphs:
 
 ```bash
 # Auto-configure: detect pos/neg tokens and optimal strength
-python experiments/16_attribution_graph.py auto-config --concept Bread --layer 37
+python experiments/16_steering_attribution.py auto-config --concept Bread --layer 37
 
-# Full pipeline: extract SA, compute ISA, build graph (backward + forward)
-python experiments/16_attribution_graph.py all \
+# Extract SA at multiple strengths + compute ISA
+python experiments/16_steering_attribution.py extract-all --concept Bread --layer 37
+
+# Or extract at a single strength:
+python experiments/16_steering_attribution.py extract-sa --concept Bread --layer 37 --strength 4.0
+python experiments/16_steering_attribution.py compute-isa --concept Bread --layer 37
+
+# Build attribution graph (backward + forward tracing)
+python experiments/17_attribution_graph.py build-graph --concept Bread --layer 37 --direction both
+
+# Full pipeline: extract SA, compute ISA, build graph, visualize
+python experiments/17_attribution_graph.py all \
     --concept Bread --layer 37 --strength 4.0 \
     --direction both --trace-depth 2
 
-# Or run steps individually:
-python experiments/16_attribution_graph.py extract-sa --concept Bread --layer 37 --strength 4.0
-python experiments/16_attribution_graph.py compute-isa --concept Bread --layer 37
-python experiments/16_attribution_graph.py build-graph --concept Bread --layer 37 --direction both
-python experiments/16_attribution_graph.py visualize --concept Bread --layer 37
+# Re-render existing graph
+python experiments/17_attribution_graph.py visualize --concept Bread --layer 37
 ```
 
 ### Generating Figures
