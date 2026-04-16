@@ -1,5 +1,5 @@
 """
-Experiment 21: Concept Vector Injection - Core Steering and Evaluation
+Steering Evaluation (02): Concept Vector Injection - Core Steering and Evaluation
 
 This is the canonical steering and evaluation script for the "Mechanisms of
 Introspective Awareness" paper. It performs concept vector injection experiments:
@@ -252,7 +252,7 @@ def write_debug_file(debug_dir: Path, debug_info: Dict):
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Experiment 21: Concept Vector Injection - Core Steering and Evaluation")
+    parser = argparse.ArgumentParser(description="Steering Evaluation (02): Concept Vector Injection - Core Steering and Evaluation")
     parser.add_argument("-m", "--models", type=str, nargs="+", default=[DEFAULT_MODEL], help="Model name(s) (e.g., llama_8b deepseek_v3 qwen_7b) or 'all' to run on all existing models in output dir")
     parser.add_argument("-c", "--concepts", type=str, nargs="+", default=DEFAULT_TEST_CONCEPTS, help="List of concept words to test")
     parser.add_argument("-nb", "--n-baseline", type=int, default=DEFAULT_N_BASELINE, help="Number of baseline words for vector extraction")

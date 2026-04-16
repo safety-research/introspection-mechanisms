@@ -1,5 +1,5 @@
 """
-Exp40 Pretraining Alignment Analysis
+Pretraining Alignment Analysis
 
 Goal: Test if the introspection direction (mean-diff from experiment 04d/04e (direction analysis)) aligns with
 "factual vs uncertain" content in pretraining data.
@@ -125,42 +125,39 @@ MODEL_CONFIGS = {
 
 
 def load_introspection_direction(direction_dir: Path, model_name: str) -> torch.Tensor:
-    """Load the mean-diff introspection direction from experiment 04d/04e (direction analysis) results."""
-    # Try multiple possible locations
-    possible_paths = [
+    """Load the mean-diff introspection direction written by 04b_vector_geometry.py.
+
+    04b_vector_geometry.py writes ``introspection_direction_mean_diff.pt`` under
+    each ``<model>/layer_<L>_strength_<s>/<metric>/`` config dir. This loader
+    walks config dirs and returns the first match. ``direction_dir`` is
+    consulted as a user-supplied override.
+    """
+    v4b_root = Path(f"analysis/04b_vector_geometry/{model_name}")
+    if v4b_root.exists():
+        for cfg in sorted(v4b_root.glob("layer_*_strength_*")):
+            for metric in ("detection_rate", "combined_detection_and_identification_rate"):
+                p = cfg / metric / "introspection_direction_mean_diff.pt"
+                if p.exists():
+                    direction = torch.load(p, weights_only=True)
+                    print(f"Loaded introspection direction from {p}")
+                    print(f"  Shape: {direction.shape}, Norm: {direction.norm().item():.2f}")
+                    return direction
+
+    candidates = [
+        direction_dir / model_name / "introspection_direction_mean_diff.pt",
         direction_dir / model_name / "mean_diff_direction.pt",
         direction_dir / model_name / "introspection_direction.pt",
-        Path(f"analysis/04d_mean_diff_swap/{model_name}/mean_diff_direction.pt"),
     ]
-
-    for path in possible_paths:
+    for path in candidates:
         if path.exists():
-            direction = torch.load(path)
+            direction = torch.load(path, weights_only=True)
             print(f"Loaded introspection direction from {path}")
             print(f"  Shape: {direction.shape}, Norm: {direction.norm().item():.2f}")
             return direction
 
-    # If not found, try to compute from mu_succ and mu_fail
-    results_path = direction_dir / model_name / "results.json"
-    if not results_path.exists():
-        results_path = Path(f"analysis/04d_mean_diff_swap/{model_name}/results.json")
-
-    if results_path.exists():
-        # Load the saved group means and compute direction
-        mu_succ_path = results_path.parent / "mu_succ.pt"
-        mu_fail_path = results_path.parent / "mu_fail.pt"
-
-        if mu_succ_path.exists() and mu_fail_path.exists():
-            mu_succ = torch.load(mu_succ_path)
-            mu_fail = torch.load(mu_fail_path)
-            direction = mu_succ - mu_fail
-            print(f"Computed introspection direction from saved centroids")
-            print(f"  Shape: {direction.shape}, Norm: {direction.norm().item():.2f}")
-            return direction
-
     raise FileNotFoundError(
-        f"Could not find introspection direction. Tried: {possible_paths}\n"
-        f"Please run 04d_mean_diff_swap.py first to generate the direction."
+        f"Could not find introspection direction. Searched 04b_vector_geometry config "
+        f"dirs under {v4b_root} and {candidates}. Please run 04b_vector_geometry.py first."
     )
 
 
@@ -613,7 +610,7 @@ def run_analysis(
     Run the full pretraining alignment analysis.
     """
     print("=" * 80)
-    print("EXP40 PRETRAINING ALIGNMENT ANALYSIS")
+    print("PRETRAINING ALIGNMENT ANALYSIS")
     print("=" * 80)
     print(f"Model: {model_name}")
     print(f"Dataset: {dataset_name}")
@@ -628,7 +625,7 @@ def run_analysis(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if direction_dir is None:
-        direction_dir = Path("analysis/04d_mean_diff_swap")
+        direction_dir = Path("analysis/04b_vector_geometry")
 
     # Step 1: Load introspection direction
     print("\n[1/5] Loading introspection direction...")
@@ -782,7 +779,7 @@ def run_analysis(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Exp40 Pretraining Alignment Analysis")
+    parser = argparse.ArgumentParser(description="Pretraining Alignment Analysis")
     parser.add_argument("--model", type=str, default="gemma3_27b",
                        choices=list(MODEL_CONFIGS.keys()),
                        help="Model to use")

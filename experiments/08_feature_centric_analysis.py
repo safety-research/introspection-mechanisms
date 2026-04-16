@@ -466,7 +466,7 @@ def load_detection_rates(
     results_file = steering_dir / "results.csv"
 
     if not results_file.exists():
-        raise FileNotFoundError(f"Experiment 02 (steering evaluation) results not found: {results_file}")
+        raise FileNotFoundError(f"02_steering_evaluation results not found: {results_file}")
 
     print(f"  Loading detection rates from {results_file}...")
     df = pd.read_csv(results_file)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 03d: Refusal Abliteration and Introspection Evaluation
+Refusal Abliteration (03d): Refusal Abliteration and Introspection Evaluation
 
 Tests whether removing the "refusal direction" from model activations increases
 introspection rates (detection + identification). The hypothesis is that refusal
@@ -16,7 +16,7 @@ Paper references:
 - Appendix F: Abliterated model details (per-layer refusal direction, projection formula)
 
 This experiment:
-1. Loads best config (steering_layer, strength) from Experiment 02 (steering evaluation)
+1. Loads best config (steering_layer, strength) from 02_steering_evaluation
 2. Extracts per-layer refusal directions from harmful/harmless prompt pairs
 3. Runs baseline trials (concept steering only)
 4. Runs treatment trials (concept steering + refusal ablation)
@@ -142,7 +142,7 @@ DEFAULT_REGION_BOUNDARIES = {
 # Number of instructions per category for refusal direction extraction
 DEFAULT_N_INSTRUCTIONS = 512
 
-# Full list of 50 test concepts (same as Experiment 02 (steering evaluation))
+# Full list of 50 test concepts (same as 02_steering_evaluation)
 DEFAULT_TEST_CONCEPTS = [
     "Dust", "Satellites", "Trumpets", "Origami", "Illusions",
     "Cameras", "Lightning", "Constellations", "Treasures", "Phones",
@@ -891,7 +891,7 @@ def run_introspection_trials_batched(
 
 
 # =============================================================================
-# Load Best Config and Vectors from Experiment 02 (steering evaluation)
+# Load Best Config and Vectors from 02_steering_evaluation
 # =============================================================================
 
 def load_best_steering_config(
@@ -899,7 +899,7 @@ def load_best_steering_config(
     model_name: str,
 ) -> Tuple[int, float, Dict]:
     """
-    Load the best configuration (steering_layer, strength) from Experiment 02 (steering evaluation) results.
+    Load the best configuration (steering_layer, strength) from 02_steering_evaluation results.
 
     Best config is selected by combined_detection_and_identification_rate.
 
@@ -910,7 +910,7 @@ def load_best_steering_config(
 
     if not model_dir.exists():
         raise FileNotFoundError(
-            f"Experiment 02 (steering evaluation) results not found for {model_name} at {model_dir}"
+            f"02_steering_evaluation results not found for {model_name} at {model_dir}"
         )
 
     best_config = None
@@ -955,7 +955,7 @@ def load_concept_vectors_from_steering(
     concepts: List[str],
 ) -> Dict[str, torch.Tensor]:
     """
-    Load concept vectors directly from Experiment 02 (steering evaluation)'s saved vectors.
+    Load concept vectors directly from 02_steering_evaluation's saved vectors.
 
     Returns:
         Dictionary mapping concept name -> steering vector tensor
@@ -1092,15 +1092,15 @@ def run_experiment(
         print(f"  Model loaded: {n_layers} layers, d_model={model.d_model}")
 
         # =================================================================
-        # STEP 2: Load best config from Experiment 02 (steering evaluation)
+        # STEP 2: Load best config from 02_steering_evaluation
         # =================================================================
-        print("\n[2/6] Loading best config from Experiment 02 (steering evaluation)...")
+        print("\n[2/6] Loading best config from 02_steering_evaluation...")
         try:
             steering_layer, strength, steering_metrics = load_best_steering_config(
                 steering_dir, model_name
             )
             print(f"  Best config: layer={steering_layer}, strength={strength}")
-            print(f"  Experiment 02 (steering evaluation) introspection rate: "
+            print(f"  02_steering_evaluation introspection rate: "
                   f"{steering_metrics.get('combined_detection_and_identification_rate', 'N/A'):.2%}")
         except FileNotFoundError as e:
             print(f"  Warning: {e}")
@@ -1117,9 +1117,9 @@ def run_experiment(
             strength = strength_override
 
         # =================================================================
-        # STEP 3: Load concept vectors from Experiment 02 (steering evaluation)
+        # STEP 3: Load concept vectors from 02_steering_evaluation
         # =================================================================
-        print("\n[3/6] Loading concept vectors from Experiment 02 (steering evaluation)...")
+        print("\n[3/6] Loading concept vectors from 02_steering_evaluation...")
         try:
             concept_vectors = load_concept_vectors_from_steering(
                 steering_dir=steering_dir,
@@ -1127,7 +1127,7 @@ def run_experiment(
                 steering_layer=steering_layer,
                 concepts=test_concepts,
             )
-            print(f"  Loaded {len(concept_vectors)} concept vectors from Experiment 02 (steering evaluation)")
+            print(f"  Loaded {len(concept_vectors)} concept vectors from 02_steering_evaluation")
 
             test_concepts = [c for c in test_concepts if c in concept_vectors]
             if len(test_concepts) == 0:
@@ -1955,7 +1955,7 @@ def parse_args():
                         default=DEFAULT_SAMPLES_PER_TRIAL,
                         help="Samples per trial number (default: 3)")
     parser.add_argument("--steering-dir", type=str, default=DEFAULT_STEERING_DIR,
-                        help="Path to Experiment 02 (steering evaluation) results")
+                        help="Path to 02_steering_evaluation results")
     parser.add_argument("-o", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                         help="Output directory")
     parser.add_argument("--refusal-ablation-weight", type=float,

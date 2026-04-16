@@ -63,7 +63,20 @@ def get_steering_base(steering_layer: int, steering_strength: float) -> Path:
 
 
 def get_direction_base(steering_layer: int, steering_strength: float) -> Path:
-    return Path(f"analysis/04d_mean_diff_swap/gemma3_27b/layer_{steering_layer}_strength_{steering_strength}")
+    """Directory holding introspection_direction_mean_diff.pt for a given config.
+
+    This is the ``detection_rate`` subdirectory written by 04b_vector_geometry.py
+    under each ``layer_<L>_strength_<s>/`` config.
+    """
+    return Path(
+        f"analysis/04b_vector_geometry/gemma3_27b/"
+        f"layer_{steering_layer}_strength_{steering_strength}/detection_rate"
+    )
+
+
+def resolve_mean_diff_path(base: Path) -> Path:
+    """Return the mean-diff direction file under ``base`` if present."""
+    return base / "introspection_direction_mean_diff.pt"
 
 
 def get_concept_vectors_dir(steering_layer: int) -> Path:
@@ -137,13 +150,13 @@ def load_concept_mean_diff_projections(
     Returns dict mapping concept name -> projection value (scalar).
     """
     direction_base = get_direction_base(steering_layer, steering_strength)
-    mean_diff_path = direction_base / "mean_diff_direction.pt"
+    mean_diff_path = resolve_mean_diff_path(direction_base)
 
     if not mean_diff_path.exists():
-        print(f"  WARNING: Mean-diff direction not found: {mean_diff_path}")
+        print(f"  WARNING: Mean-diff direction not found under {direction_base}")
         return {}
 
-    mean_diff = torch.load(mean_diff_path).float()
+    mean_diff = torch.load(mean_diff_path, weights_only=True).float()
     mean_diff = mean_diff / mean_diff.norm()
 
     vectors_dir = Path(f"analysis/02b_steering_500_concepts/gemma3_27b/vectors/layer_{steering_layer}")
@@ -768,9 +781,9 @@ def _plot_logit_attr_ridge(
             try:
                 steering_layer_c = results.get('steering_layer', 37)
                 steering_strength_c = results.get('steering_strength', 4.0)
-                md_dir_path_c = get_direction_base(steering_layer_c, steering_strength_c) / "mean_diff_direction.pt"
+                md_dir_path_c = resolve_mean_diff_path(get_direction_base(steering_layer_c, steering_strength_c))
                 if md_dir_path_c.exists():
-                    md_dir_c = torch.load(md_dir_path_c, map_location='cpu').float().flatten()
+                    md_dir_c = torch.load(md_dir_path_c, map_location='cpu', weights_only=True).float().flatten()
                     md_dir_c = md_dir_c / (md_dir_c.norm() + 1e-10)
                     lm_head_c, tok_c = get_lm_head_and_tokenizer()
                     if lm_head_c is not None:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 62: SAE Steering Attribution (SA = GA × SG)
+SAE Steering Attribution (16): SAE Steering Attribution (SA = GA × SG)
 
 Performs SAE-level steering attribution analysis, decomposing the causal effect
 of steering vectors into per-feature contributions using gradient attribution (GA)
@@ -23,7 +23,7 @@ see 17_attribution_graph.py.
 Paper sections supported:
   - Section 5.3 ("Gate and Evidence Carrier Features")
   - Section 5.4 ("Circuit Analysis")
-  - Appendix: Steering Attribution Framework
+  - Appendix Q ("Steering Attribution")
 
 Model: Primarily Gemma-3 27B with Gemma Scope 2 SAEs/Transcoders (262k, big)
 Steering: Layer 37, strength 4.0 (configurable)
@@ -79,8 +79,8 @@ DEFAULT_TRACE_DEPTH = 2
 DEFAULT_MAX_PER_TYPE = [8, 5, 3, 2]  # Per-hop: progressively narrower
 DEFAULT_FRAC_OF_MAX = 0.10
 DEFAULT_TOKEN_POS = -1
-DEFAULT_EXP21_DIR = "analysis/exp21_more_concepts_steering"
-DEFAULT_OUTPUT_DIR = "analysis/exp62_attribution_graph"
+DEFAULT_VECTORS_DIR = "analysis/02b_steering_500_concepts"
+DEFAULT_OUTPUT_DIR = "analysis/16_steering_attribution"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_SEED = 42
@@ -421,10 +421,14 @@ def find_steering_start(tokenizer, prompt: str, trial_num: int) -> int:
 
 
 def load_concept_vectors(
-    exp21_dir: str, model_name: str, concepts: List[str], layer: int,
+    vectors_dir: str, model_name: str, concepts: List[str], layer: int,
 ) -> Dict[str, torch.Tensor]:
-    """Load concept vectors from exp21 results."""
-    base = Path(exp21_dir) / model_name / "vectors"
+    """Load concept vectors from a steering-evaluation output directory.
+
+    Expects the layout written by 02b_run_500_concepts.py:
+      {vectors_dir}/{model_name}/vectors/layer_{L}/{concept}.pt
+    """
+    base = Path(vectors_dir) / model_name / "vectors"
     layer_dirs = sorted(base.glob("layer_*"))
     if layer_dirs:
         best = min(layer_dirs, key=lambda d: abs(int(d.name.replace("layer_", "")) - layer))
@@ -799,7 +803,7 @@ def run_auto_config(args) -> None:
 
     mw = load_model(args.model, device=args.device, dtype=args.dtype,
                      quantization=getattr(args, "quantization", None))
-    vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+    vectors = load_concept_vectors(args.vectors_dir, args.model, [concept], layer)
     if concept not in vectors:
         print(f"  ERROR: No vector for {concept}")
         return
@@ -1564,7 +1568,7 @@ def compute_isa(sa_dir: Path, trial_nums: List[int] = None) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experiment 62: SAE Steering Attribution (SA = GA × SG)"
+        description="SAE Steering Attribution (16): SAE Steering Attribution (SA = GA × SG)"
     )
     subparsers = parser.add_subparsers(dest="phase")
 
@@ -1573,7 +1577,9 @@ def parse_args():
     common.add_argument("--concept", type=str, required=True)
     common.add_argument("-l", "--layer", type=int, default=DEFAULT_LAYER)
     common.add_argument("--trial-num", type=int, default=1)
-    common.add_argument("--exp21-dir", type=str, default=DEFAULT_EXP21_DIR)
+    common.add_argument("--vectors-dir", type=str, default=DEFAULT_VECTORS_DIR,
+                        help="Directory containing concept vectors from 02b_run_500_concepts.py "
+                             f"(default: {DEFAULT_VECTORS_DIR}).")
     common.add_argument("-od", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     common.add_argument("-d", "--device", type=str, default=DEFAULT_DEVICE)
     common.add_argument("-dt", "--dtype", type=str, default=DEFAULT_DTYPE)
@@ -1636,7 +1642,7 @@ def main():
     elif args.phase == "extract-sa":
         print(f"Extracting SA for {concept} layer {layer} strength {args.strength}")
         mw = load_model(args.model, device=args.device, dtype=args.dtype, quantization=args.quantization)
-        vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+        vectors = load_concept_vectors(args.vectors_dir, args.model, [concept], layer)
         if concept not in vectors:
             print(f"  ERROR: No vector for {concept}")
             return
@@ -1651,7 +1657,7 @@ def main():
 
     elif args.phase == "extract-all":
         mw = load_model(args.model, device=args.device, dtype=args.dtype, quantization=args.quantization)
-        vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+        vectors = load_concept_vectors(args.vectors_dir, args.model, [concept], layer)
         if concept not in vectors:
             print(f"  ERROR: No vector for {concept}")
             return

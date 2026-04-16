@@ -1,5 +1,5 @@
 """
-Experiment 56: Negative Steering for Behavioral Direction Removal
+Negative Steering (05): Negative Steering for Behavioral Direction Removal
 
 Goal:
 Test whether models can detect when safety/alignment-related behavior directions
@@ -57,7 +57,7 @@ MODELS_WITHOUT_SYSTEM_ROLE = ["gemma_2b", "gemma_7b", "gemma2_2b", "gemma2_9b", 
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Exp56: Negative steering for behavioral direction removal")
+    parser = argparse.ArgumentParser(description="Negative steering for behavioral direction removal")
     parser.add_argument("-m", "--models", type=str, nargs="+", default=[DEFAULT_MODEL], help="Model name(s) or 'all' to run on all existing models in output dir")
     parser.add_argument("-d", "--directions", type=str, nargs="+", default=None, help="Behavior directions to test (default: all)")
     parser.add_argument("-s", "--strength", type=float, default=DEFAULT_STRENGTH, help="Magnitude of subtraction (applied as negative strength)")
@@ -487,7 +487,7 @@ def main():
 
     for model_name in models_to_run:
         print("=" * 80)
-        print(f"EXP56 NEGATIVE STEERING - MODEL: {model_name}")
+        print(f"NEGATIVE STEERING - MODEL: {model_name}")
         print("=" * 80)
 
         model_dir = output_dir / model_name.replace("/", "_")
@@ -734,7 +734,7 @@ def main():
         # Save summary
         summary_path = config_dir / "summary.txt"
         with open(summary_path, "w") as f:
-            f.write("EXP56 NEGATIVE STEERING SUMMARY\n")
+            f.write("NEGATIVE STEERING SUMMARY\n")
             f.write("=" * 80 + "\n\n")
             f.write(f"Model: {model_name}\n")
             f.write(f"Directions: {', '.join(directions)}\n")

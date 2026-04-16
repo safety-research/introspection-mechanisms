@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 04d: Ridge Projection vs. Residual Decomposition (Swap Experiments)
+Swap Experiments (04d): Ridge Projection vs. Residual Decomposition (Swap Experiments)
 
 Determines whether introspection behavior is driven by projection onto the
 ridge regression direction (which predicts detection rate) or by the residual
@@ -12,7 +12,7 @@ Decomposition:
     where:
     - proj_ridge[c] = (v[c] . w_ridge) * w_ridge  (projection onto ridge direction)
     - delta_perp[c] = v[c] - proj_ridge[c]  (residual orthogonal to ridge direction)
-    - w_ridge is loaded from 04b_vector_decomposition primary_axis.pt
+    - w_ridge is loaded from 04b_vector_geometry/.../primary_axis.pt
 
 Swap conditions tested on BOTH success and failure concepts:
 
@@ -40,8 +40,8 @@ Paper references:
 - Figures: ridge-swap.pdf
 
 Dependencies:
-- 04b_vector_decomposition -> Ridge direction in primary_axis.pt
-- 04b_vector_geometry.py -> success/failure partition in subspace_analysis.json
+- 04b_vector_geometry.py -> Ridge direction in primary_axis.pt AND
+                              success/failure partition in subspace_analysis.json
 - 02b_steering_500_concepts -> concept vectors + baseline steering results
 
 Usage:
@@ -78,8 +78,10 @@ from eval_utils import LLMJudge, batch_evaluate
 # Default configuration
 # ---------------------------------------------------------------------------
 DEFAULT_MODEL = "gemma3_27b"
+# 04b_vector_geometry.py writes the ridge direction (primary_axis.pt) and all
+# decomposition artifacts (mean_diff, LDA, group centroids) into a single
+# per-config subdir — there is no separate decomposition directory.
 DEFAULT_GEOMETRY_DIR = "analysis/04b_vector_geometry"
-DEFAULT_GEOMETRY_DECOMP_DIR = "analysis/04b_vector_decomposition"
 DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
 DEFAULT_OUTPUT_DIR = "analysis/04d_ridge_swap"
 DEFAULT_THRESHOLD = 0.2
@@ -234,18 +236,22 @@ def load_steering_baseline_per_concept(
 
 
 def load_ridge_direction(
-    geometry_decomp_dir: Path, model_name: str,
+    geometry_dir: Path, model_name: str,
     layer: int, strength: float, metric: str = "detection_rate",
 ) -> torch.Tensor:
-    """Load the unit-normalized ridge regression direction from 04b_vector_decomposition."""
-    ridge_path = (
-        geometry_decomp_dir / model_name
-        / f"layer_{layer}_strength_{strength}" / metric / "primary_axis.pt"
-    )
-    if not ridge_path.exists():
+    """Load the unit-normalized ridge regression direction written by 04b_vector_geometry.py.
+
+    Tries ``primary_axis.pt`` first (alias written by 04b), then falls back to
+    ``introspection_direction_ridge_regression.pt`` under the same config dir.
+    """
+    base = geometry_dir / model_name / f"layer_{layer}_strength_{strength}" / metric
+    candidates = [base / "primary_axis.pt", base / "introspection_direction_ridge_regression.pt"]
+
+    ridge_path = next((p for p in candidates if p.exists()), None)
+    if ridge_path is None:
         raise FileNotFoundError(
-            f"Ridge direction not found at {ridge_path}. "
-            f"Run 04b_vector_decomposition.py first."
+            f"Ridge direction not found at any of: {', '.join(str(p) for p in candidates)}. "
+            f"Run 04b_vector_geometry.py first."
         )
     w_ridge = torch.load(ridge_path, map_location="cpu", weights_only=True)
     if isinstance(w_ridge, dict):
@@ -1103,7 +1109,6 @@ def create_plots(
 def run_experiment(
     model_name: str,
     geometry_dir: Path,
-    geometry_decomp_dir: Path,
     steering_dir: Path,
     output_dir: Path,
     threshold: float,
@@ -1167,7 +1172,7 @@ def run_experiment(
 
     # Load ridge direction and decompose
     print("\nLoading ridge direction and computing decomposition...")
-    w_ridge = load_ridge_direction(geometry_decomp_dir, model_name, layer_idx, strength)
+    w_ridge = load_ridge_direction(geometry_dir, model_name, layer_idx, strength)
     w_ridge, ridge_scores_success, deltas_success, ridge_scores_failure, deltas_failure = (
         compute_ridge_decomposition(vectors, w_ridge, success_with_vectors, failure_with_vectors)
     )
@@ -1414,8 +1419,6 @@ def parse_args():
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL, help="Model name")
     parser.add_argument("--geometry-dir", default=DEFAULT_GEOMETRY_DIR,
                         help="Path to 04b_vector_geometry results")
-    parser.add_argument("--geometry-decomp-dir", default=DEFAULT_GEOMETRY_DECOMP_DIR,
-                        help="Path to 04b_vector_decomposition results")
     parser.add_argument("--steering-dir", default=DEFAULT_STEERING_DIR,
                         help="Path to experiment 02 (steering evaluation) results")
     parser.add_argument("-od", "--output-dir", default=DEFAULT_OUTPUT_DIR)
@@ -1447,7 +1450,6 @@ def parse_args():
 def main():
     args = parse_args()
     geometry_dir = Path(args.geometry_dir)
-    geometry_decomp_dir = Path(args.geometry_decomp_dir)
     steering_dir = Path(args.steering_dir)
     output_dir = Path(args.output_dir)
 
@@ -1484,7 +1486,6 @@ def main():
     run_experiment(
         model_name=args.model,
         geometry_dir=geometry_dir,
-        geometry_decomp_dir=geometry_decomp_dir,
         steering_dir=steering_dir,
         output_dir=output_dir,
         threshold=args.threshold,

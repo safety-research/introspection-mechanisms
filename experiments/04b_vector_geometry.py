@@ -911,6 +911,8 @@ def compute_introspection_subspace_analysis(
         "failure_concepts": list(failure_concepts),
         "success_vectors": success_vectors,
         "failure_vectors": failure_vectors,
+        "mean_success": mean_success,
+        "mean_failure": mean_failure,
         "mean_difference": mean_difference,
         "mean_difference_norm": mean_difference_norm,
         "lda": lda,
@@ -1014,11 +1016,16 @@ def compute_ridge_regression(
             f"      Nested CV R^2={cv_r2:.3f} +/- {cv_r2_std:.3f} (outer 5-fold)"
         )
 
-    # Save
+    # Save under two filenames:
+    #   - introspection_direction_ridge_regression.pt: descriptive name used here
+    #   - primary_axis.pt: short name consumed by 04c_bidirectional_steering.py,
+    #                      04d_ridge_swap.py, and 04i_alternative_geometric_tests.py
+    direction_tensor = torch.tensor(direction_norm, dtype=torch.float32)
     torch.save(
-        torch.tensor(direction_norm, dtype=torch.float32),
+        direction_tensor,
         output_dir / "introspection_direction_ridge_regression.pt",
     )
+    torch.save(direction_tensor, output_dir / "primary_axis.pt")
 
     metadata = {
         "method": "Ridge_Regression",
@@ -1567,6 +1574,18 @@ def analyze_model(
             torch.save(
                 torch.tensor(subspace_analysis["mean_difference"]),
                 metric_out / "introspection_direction_mean_diff.pt",
+            )
+        # Also save the success/failure group centroids so downstream scripts
+        # (e.g., 04e synthetic threshold test) can sweep v = mu_fail + alpha*d_diff.
+        if subspace_analysis.get("mean_success") is not None:
+            torch.save(
+                torch.tensor(subspace_analysis["mean_success"]),
+                metric_out / "mean_success.pt",
+            )
+        if subspace_analysis.get("mean_failure") is not None:
+            torch.save(
+                torch.tensor(subspace_analysis["mean_failure"]),
+                metric_out / "mean_failure.pt",
             )
 
         # Save subspace analysis JSON

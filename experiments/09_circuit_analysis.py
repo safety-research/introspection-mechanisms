@@ -62,7 +62,11 @@ DEFAULT_STEERING_STRENGTH = 4.0
 GEOMETRY_PARTITION_PATH = Path("analysis/04b_vector_geometry")
 
 
-def load_success_failure_partition(model_name: str = "gemma3_27b") -> Tuple[List[str], List[str]]:
+def load_success_failure_partition(
+    model_name: str = "gemma3_27b",
+    steering_layer: int = STEERING_LAYER,
+    steering_strength: float = DEFAULT_STEERING_STRENGTH,
+) -> Tuple[List[str], List[str]]:
     """
     Load the success/failure partition from 04b_vector_geometry.
 
@@ -71,9 +75,14 @@ def load_success_failure_partition(model_name: str = "gemma3_27b") -> Tuple[List
 
     Returns: (success_concepts, failure_concepts)
     """
-    # Try with detection_rate subdirectory first (newer format), then without
-    partition_file = GEOMETRY_PARTITION_PATH / model_name / f"layer_{STEERING_LAYER}_strength_{DEFAULT_STEERING_STRENGTH}" / "detection_rate" / "subspace_analysis.json"
+    partition_file = (
+        GEOMETRY_PARTITION_PATH / model_name
+        / f"layer_{steering_layer}_strength_{steering_strength}"
+        / "detection_rate" / "subspace_analysis.json"
+    )
     if not partition_file.exists():
+        # Older single-config runs wrote the file at the model root without
+        # a per-config subdirectory; accept that layout too.
         partition_file = GEOMETRY_PARTITION_PATH / model_name / "subspace_analysis.json"
     if not partition_file.exists():
         raise FileNotFoundError(f"Partition file not found: {partition_file}")
@@ -93,7 +102,7 @@ try:
     print(f"Loaded experiment 04b (vector geometry) partition: {len(SUCCESS_CONCEPTS)} success, {len(FAILURE_CONCEPTS)} failure concepts")
 except FileNotFoundError:
     SUCCESS_CONCEPTS, FAILURE_CONCEPTS = [], []
-    print("Warning: Experiment 04b (vector geometry) partition not found. Run 04b_vector_geometry.py first to generate it.")
+    print("Warning: 04b_vector_geometry (vector geometry) partition not found. Run 04b_vector_geometry.py first to generate it.")
 
 # Transcoder configuration
 TRANSCODER_WIDTH = "262k"
@@ -121,8 +130,28 @@ DEFAULT_TOKEN_MODE = "last_token"  # Options: "last_token", "mean_steering_token
 # Global OUTPUT_DIR - set at runtime based on token_mode
 OUTPUT_DIR = None
 
-# Path to experiment 02 (steering evaluation) data (500 concepts with per-concept detection rates)
-STEERING_DATA_PATH = Path("analysis/02b_steering_500_concepts/gemma3_27b/layer_37_strength_4.0/results.json")
+# Path to experiment 02b (500-concept steering evaluation) per-concept results.
+# Populated at runtime from --steering-dir/--model/--steering-layer/--steering-strength.
+DEFAULT_STEERING_DIR = Path("analysis/02b_steering_500_concepts")
+
+
+def build_steering_data_path(
+    model: str,
+    steering_layer: int,
+    steering_strength: float,
+    steering_dir: Path = DEFAULT_STEERING_DIR,
+) -> Path:
+    """Return the per-concept results.json path for a steering config."""
+    return (
+        Path(steering_dir) / model
+        / f"layer_{steering_layer}_strength_{steering_strength}"
+        / "results.json"
+    )
+
+
+# Back-compat default for callers that import this constant without yet knowing
+# their steering config; `build_steering_data_path` is the canonical API.
+STEERING_DATA_PATH = build_steering_data_path("gemma3_27b", 37, 4.0)
 
 
 # =============================================================================
@@ -218,18 +247,27 @@ def get_default_tokens() -> Tuple[Set[str], Set[str]]:
 
 
 def load_per_concept_detection_rates(
-    steering_path: Path = None,
+    steering_path: Optional[Path] = None,
     trials: Optional[List[int]] = None,
+    model: str = "gemma3_27b",
+    steering_layer: int = STEERING_LAYER,
+    steering_strength: float = DEFAULT_STEERING_STRENGTH,
+    steering_dir: Path = DEFAULT_STEERING_DIR,
 ) -> Dict[str, float]:
-    """Load per-concept detection rates from experiment 02 (steering evaluation) data.
+    """Load per-concept detection rates from 02b_run_500_concepts.py output.
 
     Returns dict mapping concept name -> detection rate (0 to 1).
+
+    If ``steering_path`` is not supplied, it is built from ``model``,
+    ``steering_layer``, ``steering_strength``, and ``steering_dir``.
     """
     if steering_path is None:
-        steering_path = STEERING_DATA_PATH
+        steering_path = build_steering_data_path(
+            model, steering_layer, steering_strength, steering_dir=steering_dir
+        )
 
     if not steering_path.exists():
-        print(f"Warning: experiment 02 (steering evaluation) data not found at {steering_path}")
+        print(f"Warning: experiment 02b (steering evaluation) data not found at {steering_path}")
         return {}
 
     with open(steering_path) as f:
@@ -261,7 +299,14 @@ def load_per_concept_detection_rates(
 
 
 def load_feature_labels(layers: List[int]) -> Dict[int, Dict[int, str]]:
-    """Load feature labels for transcoder layers."""
+    """Load feature labels for transcoder layers.
+
+    NOTE (external dependency): labels are not bundled with this repo. They
+    come from a sibling ``gemma-scope-2/feature_labels/`` directory; see the
+    "External dependency: Gemma-Scope-2 feature labels" section in README.md.
+    If the directory is missing, features will be identified by
+    ``(layer, feature_idx)`` instead of semantic labels.
+    """
     labels_dir = Path("../gemma-scope-2/feature_labels")
     labels = {}
     for layer in layers:
@@ -429,6 +474,7 @@ def collect_activations_for_condition(
     steering_strength: float,
     layers: List[int],
     steering_start_pos: Optional[int] = None,
+    steering_layer: int = STEERING_LAYER,
 ) -> Tuple[Dict[int, torch.Tensor], torch.Tensor]:
     """Run model and collect MLP input activations at specified layers."""
     inputs = model.tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(DEVICE)
@@ -437,7 +483,7 @@ def collect_activations_for_condition(
 
     if steering_vector is not None:
         steering_hook = SteeringHook(
-            layer_idx=STEERING_LAYER,
+            layer_idx=steering_layer,
             steering_vector=steering_vector,
             strength=steering_strength,
             start_pos=steering_start_pos,
@@ -495,6 +541,7 @@ def collect_activations_batch(
     with_steering: bool,
     steering_start_pos: Optional[int] = None,
     token_mode: str = "last_token",
+    steering_layer: int = STEERING_LAYER,
 ) -> PrecomputedActivations:
     """
     Collect feature activations for ALL concepts in a single pass.
@@ -535,6 +582,7 @@ def collect_activations_batch(
                 steering_strength,
                 layers,
                 steering_start_pos=steering_start_pos,
+                steering_layer=steering_layer,
             )
 
             probs = F.softmax(logits[0, -1], dim=-1)
@@ -623,6 +671,7 @@ def discover_aggregated_circuit(
     steering_start_pos: Optional[int] = None,
     token_mode: str = DEFAULT_TOKEN_MODE,
     precomputed_activations: Optional[PrecomputedActivations] = None,
+    steering_layer: int = STEERING_LAYER,
 ) -> AggregatedCircuit:
     """Discover circuit features aggregated across concepts and trials.
 
@@ -685,6 +734,7 @@ def discover_aggregated_circuit(
                     steering_strength,
                     list(transcoders.keys()),
                     steering_start_pos=steering_start_pos,
+                    steering_layer=steering_layer,
                 )
 
                 probs = F.softmax(logits[0, -1], dim=-1)
@@ -773,6 +823,7 @@ def discover_discriminative_features(
     token_mode: str = DEFAULT_TOKEN_MODE,
     precomputed_success: Optional[PrecomputedActivations] = None,
     precomputed_failure: Optional[PrecomputedActivations] = None,
+    steering_layer: int = STEERING_LAYER,
 ) -> Tuple[List[FeatureNode], Dict[Tuple[int, int], Dict], Dict[int, List]]:
     """Find features that best discriminate SUCCESS from FAILURE conditions.
 
@@ -865,6 +916,7 @@ def discover_discriminative_features(
                         model, prompt, concept_vec,
                         steering_strength, list(transcoders.keys()),
                         steering_start_pos=steering_start_pos,
+                        steering_layer=steering_layer,
                     )
                     for layer, tc in transcoders.items():
                         if layer not in activations:
@@ -1589,11 +1641,57 @@ def main():
         default=DEFAULT_TOKEN_MODE,
         help="Token aggregation mode (default: last_token)"
     )
+    parser.add_argument(
+        "-m", "--model", type=str, default=MODEL_NAME,
+        help=f"Model short name used when resolving per-config paths (default: {MODEL_NAME}).",
+    )
+    parser.add_argument(
+        "-sl", "--steering-layer", type=int, default=STEERING_LAYER,
+        help=f"Steering layer for 02b results / 04b partition (default: {STEERING_LAYER}).",
+    )
+    parser.add_argument(
+        "-ss", "--steering-strength", type=float, default=DEFAULT_STEERING_STRENGTH,
+        help=f"Steering strength for 02b results / 04b partition (default: {DEFAULT_STEERING_STRENGTH}).",
+    )
+    parser.add_argument(
+        "--steering-dir", type=Path, default=DEFAULT_STEERING_DIR,
+        help=f"Root directory of 02b_run_500_concepts output (default: {DEFAULT_STEERING_DIR}).",
+    )
+    parser.add_argument(
+        "--cache-only", action="store_true",
+        help="Collect + save transcoder feature activations to "
+             "analysis/08_cached_activations/ and exit. Skips circuit discovery, "
+             "discriminative-feature analysis, and plotting. Useful as a prep "
+             "step before running 07_transcoder_feature_analysis.py, "
+             "08_feature_centric_analysis.py, or 09b_causal_pathway.py.",
+    )
     args = parser.parse_args()
 
     OUTPUT_DIR = OUTPUT_DIR_BASE / args.token_mode
     print(f"Token mode: {args.token_mode}")
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Model: {args.model} | steering layer: {args.steering_layer} | steering strength: {args.steering_strength}")
+
+    # Reload the partition and per-concept detection rates to reflect CLI config.
+    global SUCCESS_CONCEPTS, FAILURE_CONCEPTS
+    try:
+        SUCCESS_CONCEPTS, FAILURE_CONCEPTS = load_success_failure_partition(
+            model_name=args.model,
+            steering_layer=args.steering_layer,
+            steering_strength=args.steering_strength,
+        )
+        print(
+            f"Loaded experiment 04b (vector geometry) partition for config "
+            f"layer_{args.steering_layer}_strength_{args.steering_strength}: "
+            f"{len(SUCCESS_CONCEPTS)} success, {len(FAILURE_CONCEPTS)} failure concepts"
+        )
+    except FileNotFoundError:
+        SUCCESS_CONCEPTS, FAILURE_CONCEPTS = [], []
+        print(
+            "Warning: 04b_vector_geometry partition not found for requested config. "
+            "Run 04b_vector_geometry.py with --layer-index={args.steering_layer} "
+            "--strength={args.steering_strength} first."
+        )
 
     print("="*80)
     print("EXPERIMENT 50: CIRCUIT TRACING FOR INTROSPECTION")
@@ -1605,7 +1703,7 @@ def main():
     # Step 1: Load model
     # =========================================================================
     print("\n[1/7] Loading Model")
-    model = load_model(MODEL_NAME, device=DEVICE, dtype=DTYPE)
+    model = load_model(args.model, device=DEVICE, dtype=DTYPE)
     print(f"Model: {model.model_name}, Layers: {model.n_layers}")
 
     # =========================================================================
@@ -1651,7 +1749,7 @@ def main():
     baseline_words = get_baseline_words(n=100)
     concept_vectors = extract_concept_vectors_batch(
         model, concept_words=concepts, baseline_words=baseline_words,
-        layer_idx=STEERING_LAYER,
+        layer_idx=args.steering_layer,
     )
 
     prompt_template = create_introspection_prompt(model, trial_num=1).replace(
@@ -1671,19 +1769,21 @@ def main():
     print("\n--- Collecting STEERED activations ---")
     steered_activations = collect_activations_batch(
         model, transcoders, concept_vectors, yes_token_ids, no_token_ids,
-        TRIAL_NUMBERS, DEFAULT_STEERING_STRENGTH, prompt_template,
+        TRIAL_NUMBERS, args.steering_strength, prompt_template,
         with_steering=True,
         steering_start_pos=steering_start_pos,
         token_mode=args.token_mode,
+        steering_layer=args.steering_layer,
     )
 
     print("\n--- Collecting CONTROL activations ---")
     control_activations = collect_activations_batch(
         model, transcoders, concept_vectors, yes_token_ids, no_token_ids,
-        TRIAL_NUMBERS, DEFAULT_STEERING_STRENGTH, prompt_template,
+        TRIAL_NUMBERS, args.steering_strength, prompt_template,
         with_steering=False,
         steering_start_pos=steering_start_pos,
         token_mode=args.token_mode,
+        steering_layer=args.steering_layer,
     )
 
     # Partition steered activations by concept type
@@ -1724,6 +1824,50 @@ def main():
     }, activations_save_path)
     print(f"  Saved precomputed activations to: {activations_save_path}")
 
+    # Also write the canonical per-config cache consumed by
+    # 07_transcoder_feature_analysis.py, 08_feature_centric_analysis.py, and
+    # 09b_causal_pathway.py (schema documented in those files).
+    transcoder_l0_tag = TRANSCODER_L0 if TRANSCODER_WIDTH == "16k" else f"{TRANSCODER_WIDTH}_{TRANSCODER_L0}"
+    canonical_base = Path("analysis/08_cached_activations")
+    canonical_base.mkdir(parents=True, exist_ok=True)
+    steered_cache_dir = canonical_base / (
+        f"L{args.steering_layer}_S{args.steering_strength}_{args.token_mode}_{transcoder_l0_tag}"
+    )
+    steered_cache_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        'concepts': steered_activations.concepts,
+        'layers': steered_activations.layers,
+        'n_features': steered_activations.n_features,
+        'activations': {
+            c: {l: t.cpu() for l, t in layers.items()}
+            for c, layers in steered_activations.activations.items()
+        },
+        'logits_info': steered_activations.logits_info,
+        'steering_layer': args.steering_layer,
+        'steering_strength': args.steering_strength,
+        'token_mode': args.token_mode,
+    }, steered_cache_dir / "steered_activations.pt")
+    print(f"  Saved canonical steered cache to: {steered_cache_dir / 'steered_activations.pt'}")
+
+    control_cache_dir = canonical_base / f"control_{args.token_mode}_{transcoder_l0_tag}"
+    control_cache_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        'concepts': control_activations.concepts,
+        'layers': control_activations.layers,
+        'n_features': control_activations.n_features,
+        'activations': {
+            c: {l: t.cpu() for l, t in layers.items()}
+            for c, layers in control_activations.activations.items()
+        },
+        'logits_info': control_activations.logits_info,
+        'token_mode': args.token_mode,
+    }, control_cache_dir / "control_activations.pt")
+    print(f"  Saved canonical control cache to: {control_cache_dir / 'control_activations.pt'}")
+
+    if args.cache_only:
+        print("\n[--cache-only] Activations cached. Skipping circuit discovery / plots.")
+        return
+
     # =========================================================================
     # Step 6: Discover circuits and discriminative features
     # =========================================================================
@@ -1747,11 +1891,12 @@ def main():
 
         circuits[condition] = discover_aggregated_circuit(
             model, transcoders, condition_vectors, yes_token_ids, no_token_ids,
-            TRIAL_NUMBERS, DEFAULT_STEERING_STRENGTH, condition, prompt_template,
+            TRIAL_NUMBERS, args.steering_strength, condition, prompt_template,
             top_k_global=30, min_effect=5.0,
             steering_start_pos=steering_start_pos,
             token_mode=args.token_mode,
             precomputed_activations=precomputed,
+            steering_layer=args.steering_layer,
         )
         for feat in circuits[condition].features:
             feat.label = feature_labels.get(feat.layer, {}).get(feat.feature_idx, "")
@@ -1763,7 +1908,7 @@ def main():
     discriminative_features, discriminative_stats, per_layer_top = discover_discriminative_features(
         model, transcoders, success_vecs, failure_vecs,
         yes_token_ids, no_token_ids,
-        TRIAL_NUMBERS, DEFAULT_STEERING_STRENGTH, prompt_template,
+        TRIAL_NUMBERS, args.steering_strength, prompt_template,
         top_k=30, min_samples=3,
         steering_start_pos=steering_start_pos,
         cache_dir=CACHE_DIR,
@@ -1771,6 +1916,7 @@ def main():
         token_mode=args.token_mode,
         precomputed_success=steered_success,
         precomputed_failure=steered_failure,
+        steering_layer=args.steering_layer,
     )
     for feat in discriminative_features:
         feat.label = feature_labels.get(feat.layer, {}).get(feat.feature_idx, "")
@@ -1881,9 +2027,9 @@ def main():
     # Save comprehensive results
     results = {
         'config': {
-            'model': MODEL_NAME,
-            'steering_layer': STEERING_LAYER,
-            'steering_strength': DEFAULT_STEERING_STRENGTH,
+            'model': args.model,
+            'steering_layer': args.steering_layer,
+            'steering_strength': args.steering_strength,
             'analysis_layers': ANALYSIS_LAYERS,
             'n_concepts': len(concepts),
             'concepts': concepts,

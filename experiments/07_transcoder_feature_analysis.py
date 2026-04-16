@@ -15,9 +15,17 @@ For each steering layer L, analyzes layer L+1 features:
 Analysis pipeline:
 1. Compute per-feature monotonicity (Spearman r) across steering strengths
 2. Compute detection correlation (feature activation vs concept detection rate)
-3. Identify gate features (top negative-DLA features with monotonic responses)
-4. Identify evidence carrier features
-5. Generate paper figures (activation vs steering strength curves)
+3. Compute direct logit attribution (DLA) per paper §5.3:
+       (w_decoder_f . (u_Yes - u_No)) * mean_activation(f)
+4. Rank features. Two metrics are available via --ranking-metric:
+     - "detector_score" (default): mean_abs_r * detection_correlation;
+       combines monotonicity and detection-predictiveness.
+     - "logit_attribution": paper §5.3 DLA. Gate candidates are the top-200
+       most-negative-DLA features (i.e., features that push Yes-No toward
+       "No"). In practice the two rankings converge on overlapping gate
+       features, but the paper's canonical formulation is DLA.
+5. Identify evidence carrier features
+6. Generate paper figures (activation vs steering strength curves)
 
 Paper figures generated:
 - top-logit-attribution-features (DLA bar chart from feature analysis)
@@ -35,7 +43,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from collections import defaultdict
 
 import numpy as np
@@ -50,7 +58,7 @@ from tqdm import tqdm
 # Configuration
 # =============================================================================
 
-EXP50_CACHE_BASE = Path("analysis/08_cached_activations")
+CACHED_ACTIVATIONS_BASE = Path("analysis/08_cached_activations")
 OUTPUT_BASE = Path("analysis/07_transcoder_feature_analysis")
 TRANSCODERS_BASE = Path("transcoders")
 GEOMETRY_BASE = Path("analysis/04b_vector_geometry/gemma3_27b")
@@ -121,6 +129,17 @@ parser.add_argument(
     type=int, default=0,
     help="[DEBUG ONLY] Sample N features for faster testing (0 = all features)"
 )
+parser.add_argument(
+    "--ranking-metric",
+    type=str, default="detector_score",
+    choices=["detector_score", "logit_attribution"],
+    help=(
+        "Ranking metric for the top-features JSON output. "
+        "'detector_score' = mean_abs_r * detection_correlation (correlation-based). "
+        "'logit_attribution' = paper §5.3 DLA: (w_dec · Δu_Yes-No) * mean_activation. "
+        "Gate candidates are ranked most-negative-first under the DLA metric."
+    ),
+)
 
 args = parser.parse_args()
 
@@ -157,6 +176,12 @@ class FeatureMonotonicity:
 
     # Detection correlation: correlation between activation and detection rate
     detection_correlation: float = 0.0
+
+    # Direct logit attribution (DLA) to Yes-No logit difference,
+    # as defined in paper §5.3: (w_decoder · (u_Yes - u_No)) * mean_activation.
+    # Populated by compute_direct_logit_attribution(); negative values identify
+    # gate candidates (features that push the Yes-No logit toward "No").
+    logit_attribution: float = 0.0
 
     @property
     def n_monotonic(self) -> int:
@@ -205,7 +230,7 @@ def load_detector_activations(
         n_features: Number of features
     """
     detector_layer = DETECTOR_LAYERS[steering_layer]
-    cache_path = EXP50_CACHE_BASE / f"L{steering_layer}_S{strength}_{token_mode}_{transcoder_l0}" / "steered_activations.pt"
+    cache_path = CACHED_ACTIVATIONS_BASE / f"L{steering_layer}_S{strength}_{token_mode}_{transcoder_l0}" / "steered_activations.pt"
 
     if not cache_path.exists():
         raise FileNotFoundError(f"Cache not found: {cache_path}")
@@ -221,7 +246,15 @@ def load_detector_activations(
 
 
 def load_feature_labels(detector_layer: int, transcoder_l0: str) -> Dict[int, str]:
-    """Load feature labels for a transcoder layer from gemma-scope-2."""
+    """Load feature labels for a transcoder layer from gemma-scope-2.
+
+    NOTE (external dependency): labels are not bundled with this repo. They
+    come from a sibling ``gemma-scope-2/feature_labels/`` directory; see the
+    "External dependency: Gemma-Scope-2 feature labels" section in README.md.
+    If the directory is missing, features will be identified by
+    ``(layer, feature_idx)`` instead of semantic labels and the script will
+    still run.
+    """
     labels = {}
 
     gemma_scope_path = Path("gemma-scope-2/feature_labels")
@@ -349,6 +382,94 @@ def load_transcoder_weights(layer: int, l0: str = "small"):
 
     tc = TranscoderWeights(params["w_enc"], params["w_dec"])
     return tc
+
+
+def compute_direct_logit_attribution(
+    features: List["FeatureMonotonicity"],
+    detector_layer: int,
+    yes_tokens: Iterable[str] = ("yes", "Yes", "YES"),
+    no_tokens: Iterable[str] = ("no", "No", "NO"),
+    transcoder_l0: str = "small",
+    model_name: str = "google/gemma-3-27b-it",
+    device: Optional[str] = None,
+) -> None:
+    """Populate ``feature.logit_attribution`` with paper §5.3's exact DLA formula.
+
+    For each transcoder feature ``f`` at ``detector_layer``, we compute::
+
+        DLA(f) = (w_decoder_f · Δu_{Yes-No}) * mean_activation(f)
+
+    where:
+      - ``w_decoder_f`` is the transcoder decoder direction for feature ``f``
+        (unit-normalized, following the paper's convention for transcoder DLA),
+      - ``Δu_{Yes-No} = mean(u_t for t in yes_tokens) - mean(u_t for t in no_tokens)``
+        with ``u_t`` taken from the unembedding matrix,
+      - ``mean_activation(f)`` is the feature's mean activation across the
+        concepts stored in ``concept_correlations`` (i.e., the monotonicity
+        sample used elsewhere in this script).
+
+    Features with **negative** ``logit_attribution`` push the Yes-No logit
+    toward "No" and are selected as gate candidates. This matches the paper's
+    "top-200 most-negative DLA" criterion when features are sorted ascending
+    by ``logit_attribution``.
+
+    This method MUTATES ``features`` in place and does not return a value.
+
+    Notes:
+      - We use the **decoder** direction for attribution (paper §5.3); this is
+        the direction through which the feature writes to the residual stream.
+      - ``transcoder_l0`` must match the transcoder width/L0 used to compute
+        activations. Default ``"small"`` matches other defaults in this file.
+      - The correlation-based ``detector_score`` is retained as an additional
+        ranking metric; DLA and detector_score usually agree on the top gates
+        but are not identical.
+    """
+    import numpy as _np
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+    from transformers import AutoTokenizer
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    tc = load_transcoder_weights(detector_layer, transcoder_l0)
+    w_dec = tc.w_dec.data.to(device=device, dtype=torch.float32)          # (n_features, d_model)
+    w_dec_unit = w_dec / (w_dec.norm(dim=-1, keepdim=True) + 1e-10)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    shard_path = hf_hub_download(repo_id=model_name, filename="model-00001-of-00012.safetensors")
+    unembed = None
+    with safe_open(shard_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            if "embed_tokens.weight" in key:
+                unembed = f.get_tensor(key).to(device=device, dtype=torch.float32)
+                break
+    if unembed is None:
+        raise RuntimeError("Could not locate unembedding weights in the first shard.")
+
+    def _avg_embed(tokens):
+        vecs = []
+        for t in tokens:
+            ids = tokenizer.encode(t, add_special_tokens=False)
+            if len(ids) == 1:
+                vecs.append(unembed[ids[0]])
+        if not vecs:
+            raise ValueError(f"None of the provided tokens are single-token: {list(tokens)}")
+        return torch.stack(vecs).mean(dim=0)
+
+    delta_u = _avg_embed(yes_tokens) - _avg_embed(no_tokens)              # (d_model,)
+    feature_unembed_scores = w_dec_unit @ delta_u                         # (n_features,)
+
+    for feat in features:
+        feat_id = int(feat.feature_id)
+        if feat_id < 0 or feat_id >= feature_unembed_scores.shape[0]:
+            feat.logit_attribution = 0.0
+            continue
+        # Mean absolute activation across the sampled concepts.
+        acts = [abs(v) for v in feat.concept_correlations.values() if _np.isfinite(v)]
+        mean_act = float(_np.mean(acts)) if acts else 0.0
+        feat.logit_attribution = float(feature_unembed_scores[feat_id].item()) * mean_act
 
 
 def is_ascii_readable(token: str) -> bool:
@@ -1297,10 +1418,18 @@ def save_results(
     features: List[FeatureMonotonicity],
     steering_layer: int,
     output_dir: Path,
+    ranking_metric: str = "detector_score",
 ):
-    """Save feature monotonicity results to CSV and JSON."""
+    """Save feature monotonicity + DLA results to CSV and JSON.
+
+    Args:
+        ranking_metric: "detector_score" (correlation-based, default) or
+            "logit_attribution" (paper §5.3 DLA). Under "logit_attribution",
+            the top-200 list is the 200 most-negative features (gate
+            candidates, i.e., features that push Yes-No toward "No").
+    """
     detector_layer = DETECTOR_LAYERS[steering_layer]
-    print(f"\n  Saving results...")
+    print(f"\n  Saving results (ranking_metric={ranking_metric})...")
 
     rows = []
     for f in features:
@@ -1319,6 +1448,7 @@ def save_results(
             'specialization_score': f.specialization_score,
             'detection_correlation': f.detection_correlation,
             'detector_score': f.detector_score,
+            'logit_attribution': f.logit_attribution,
         })
 
     df = pd.DataFrame(rows)
@@ -1326,15 +1456,18 @@ def save_results(
     df.to_csv(output_dir / "feature_monotonicity.csv", index=False)
     print(f"    Saved: feature_monotonicity.csv ({len(df)} features)")
 
-    # JSON with full details for top features
-    top_features = sorted(features, key=lambda f: f.detector_score, reverse=True)[:200]
+    if ranking_metric == "logit_attribution":
+        # Gate candidates: top-200 most-negative DLA features.
+        top_features = sorted(features, key=lambda f: f.logit_attribution)[:200]
+    else:
+        top_features = sorted(features, key=lambda f: f.detector_score, reverse=True)[:200]
 
     json_data = {
         'steering_layer': steering_layer,
         'detector_layer': detector_layer,
         'n_features': len(features),
         'n_top': len(top_features),
-        'ranking_metric': 'detector_score',
+        'ranking_metric': ranking_metric,
         'features': []
     }
 
@@ -1348,6 +1481,7 @@ def save_results(
             'mean_r': float(f.mean_r),
             'detection_correlation': float(f.detection_correlation),
             'detector_score': float(f.detector_score),
+            'logit_attribution': float(f.logit_attribution),
             'n_monotonic_pos': int(f.n_monotonic_pos),
             'n_monotonic_neg': int(f.n_monotonic_neg),
             'monotonic_frac': float(f.monotonic_frac),
@@ -1375,6 +1509,7 @@ def run_detector_analysis(
     n_plot_features: int,
     plots_only: bool,
     debug_sample: int,
+    ranking_metric: str = "detector_score",
 ) -> Path:
     """Run detector analysis for a single steering layer."""
     detector_layer = DETECTOR_LAYERS[steering_layer]
@@ -1417,6 +1552,17 @@ def run_detector_analysis(
             debug_sample=debug_sample,
         )
         save_computed_results(features, output_dir)
+
+    # Populate direct logit attribution (paper §5.3 DLA formula) on every feature
+    # so it appears in CSV/JSON alongside the correlation-based detector_score.
+    try:
+        compute_direct_logit_attribution(
+            features=features,
+            detector_layer=detector_layer,
+            transcoder_l0=transcoder_l0,
+        )
+    except Exception as e:
+        print(f"  WARNING: DLA computation failed, leaving logit_attribution=0: {e}")
 
     # Analyze distributions
     analyze_monotonicity_distribution(
@@ -1504,6 +1650,7 @@ def run_detector_analysis(
         features=features,
         steering_layer=steering_layer,
         output_dir=output_dir,
+        ranking_metric=ranking_metric,
     )
 
     tracker.save_missing_labels(
@@ -1547,6 +1694,7 @@ def main():
                 n_plot_features=args.n_plot_features,
                 plots_only=args.plots_only,
                 debug_sample=args.debug_sample,
+                ranking_metric=args.ranking_metric,
             )
             successful.append((steering_layer, output_dir))
         except Exception as e:

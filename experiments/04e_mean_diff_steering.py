@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 40: Mean-Diff Direction Steering
+Mean-Diff Analysis: Mean-Diff Direction Steering
 
 This experiment tests whether steering with the mean-diff direction (μ_success - μ_failure)
 affects model behavior in predictable ways. The hypothesis is:
@@ -322,6 +322,181 @@ def load_mean_diff_direction(model_name: str) -> torch.Tensor:
     direction = torch.load(path, map_location='cpu', weights_only=True)
     print(f"Loaded mean-diff direction: shape={direction.shape}, norm={direction.norm().item():.2f}")
     return direction
+
+
+def _find_group_centroids(model_name: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Load mu_success / mu_failure saved by 04b_vector_geometry.
+
+    04b writes these under its per-metric output folders; pick the first that exists.
+    Raises FileNotFoundError if neither is present.
+    """
+    base = Path(f"analysis/04b_vector_geometry/{model_name}")
+    # Search one level deep for mean_success.pt / mean_failure.pt.
+    candidates = [base] + [p for p in base.glob("*") if p.is_dir()]
+    for d in candidates:
+        succ_p = d / "mean_success.pt"
+        fail_p = d / "mean_failure.pt"
+        if succ_p.exists() and fail_p.exists():
+            mu_s = torch.load(succ_p, map_location="cpu", weights_only=True).float()
+            mu_f = torch.load(fail_p, map_location="cpu", weights_only=True).float()
+            print(f"Loaded mu_success/mu_failure from {d}")
+            return mu_s, mu_f
+    raise FileNotFoundError(
+        f"mean_success.pt / mean_failure.pt not found under {base}. "
+        "Re-run 04b_vector_geometry.py first (it now saves group centroids)."
+    )
+
+
+def run_synthetic_threshold_experiment(
+    model: ModelWrapper,
+    mu_success: torch.Tensor,
+    mu_failure: torch.Tensor,
+    layer_idx: int,
+    alpha_values: List[float],
+    strength: float,
+    n_trials: int,
+    output_dir: Path,
+    max_tokens: int = 100,
+    temperature: float = 1.0,
+    verbose: bool = True,
+) -> Dict:
+    """Synthetic threshold test (Appendix D / \\Cref{figure:synthetic-threshold-test}).
+
+    For each alpha in ``alpha_values``, steer with the synthetic vector
+    ``v = mu_failure + alpha * (mu_success - mu_failure)`` and measure the
+    detection rate. The paper reports a sigmoid with the 50% crossing at
+    alpha ≈ 1.15. Per-trial detection uses a simple "yes" prefix heuristic on
+    the first 50 chars of the response — same classifier used by the original
+    exp40 threshold-experiment code path.
+
+    Args:
+        model: ModelWrapper.
+        mu_success, mu_failure: [d_model] tensors (group centroids from 04b).
+        layer_idx: Layer to inject at.
+        alpha_values: Grid of alphas to sweep (e.g., 0..2 in 0.25 steps).
+        strength: Base steering strength (the synthetic vector is *added*
+                  with this multiplier; default 4.0 to match paper).
+        n_trials: Trials per alpha.
+        output_dir: Results + plot directory.
+
+    Returns:
+        Dict with per-alpha results and the grid fit.
+    """
+    # Local import to avoid loading the full steering_utils when 04e is imported
+    # for other purposes.
+    from steering_utils import run_steered_introspection_test_batch
+
+    mean_diff = (mu_success - mu_failure).to(model.device)
+    mu_failure_d = mu_failure.to(model.device)
+
+    out: Dict = {
+        "config": {
+            "layer_idx": layer_idx,
+            "strength": strength,
+            "alpha_values": list(alpha_values),
+            "n_trials": n_trials,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "mean_diff_norm": float(mean_diff.float().norm().item()),
+            "formula": "v = mu_failure + alpha * (mu_success - mu_failure)",
+        },
+        "synthetic_threshold": {},
+    }
+
+    d_success_norm = (mean_diff.float() / (mean_diff.float().norm() + 1e-10)).cpu()
+
+    if verbose:
+        print("\n" + "=" * 72)
+        print("APPENDIX D: SYNTHETIC THRESHOLD TEST")
+        print("=" * 72)
+        print(f"  Sweeping alpha in {list(alpha_values)}, strength={strength}")
+        print(f"  Per-alpha trials: {n_trials}")
+        print(f"  ||mean_diff|| = {out['config']['mean_diff_norm']:.2f}")
+
+    for alpha in tqdm(alpha_values, desc="Synthetic threshold"):
+        v = (mu_failure_d + alpha * mean_diff).float().to(model.device)
+
+        responses = run_steered_introspection_test_batch(
+            model=model,
+            concept_word="__SYNTHETIC__",
+            steering_vector=v,
+            layer_idx=layer_idx,
+            strength=strength,
+            trial_numbers=list(range(1, n_trials + 1)),
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+        # Simple "yes" detection in the first 50 chars — matches exp40's fast path.
+        detected = sum(1 for r in responses if "yes" in r.lower()[:50])
+        det_rate = detected / max(len(responses), 1)
+        projection = float((v.float().cpu() @ d_success_norm).item())
+
+        out["synthetic_threshold"][f"alpha_{alpha}"] = {
+            "alpha": alpha,
+            "projection": projection,
+            "detection_rate": det_rate,
+            "n_trials": len(responses),
+            "n_detected": detected,
+        }
+        if verbose:
+            print(f"    alpha={alpha:<4.2f}  proj={projection:+7.2f}  det={det_rate:5.1%}  "
+                  f"({detected}/{len(responses)})")
+
+    # --- Sigmoid fit to find 50% crossing ---
+    try:
+        from scipy.optimize import curve_fit
+
+        def _sigmoid(x, k, x0):
+            return 1.0 / (1.0 + np.exp(-k * (x - x0)))
+
+        alphas = np.array([v["alpha"] for v in out["synthetic_threshold"].values()])
+        rates = np.array([v["detection_rate"] for v in out["synthetic_threshold"].values()])
+        p0 = [5.0, float(np.median(alphas))]
+        popt, _ = curve_fit(_sigmoid, alphas, rates, p0=p0, maxfev=10000)
+        k_hat, alpha50 = float(popt[0]), float(popt[1])
+        out["sigmoid_fit"] = {"k": k_hat, "alpha_50pct": alpha50}
+        if verbose:
+            print(f"\n  Sigmoid fit: 50% detection at alpha ≈ {alpha50:.2f} (slope k={k_hat:.2f})")
+            print(f"  Paper: alpha ≈ 1.15 at 50% crossing.")
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(f"  (sigmoid fit skipped: {e})")
+        out["sigmoid_fit"] = None
+
+    # --- Save + plot ---
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "synthetic_threshold_results.json", "w") as f:
+        json.dump(out, f, indent=2)
+    if verbose:
+        print(f"  Saved to {output_dir / 'synthetic_threshold_results.json'}")
+
+    alphas = np.array([v["alpha"] for v in out["synthetic_threshold"].values()])
+    rates = np.array([v["detection_rate"] for v in out["synthetic_threshold"].values()])
+    fig, ax = plt.subplots(figsize=(6.0, 4.0))
+    ax.plot(alphas, rates, marker="o", linewidth=2.5, color="#6A9BCC", label="Detection rate")
+    ax.axhline(0.5, linestyle="--", color="gray", linewidth=1.0, alpha=0.7)
+    if out.get("sigmoid_fit"):
+        a50 = out["sigmoid_fit"]["alpha_50pct"]
+        ax.axvline(a50, linestyle="--", color="#D97757", linewidth=1.5,
+                   label=f"50% crossing: α={a50:.2f}")
+        xs = np.linspace(alphas.min(), alphas.max(), 200)
+        ys = 1.0 / (1.0 + np.exp(-out["sigmoid_fit"]["k"] * (xs - a50)))
+        ax.plot(xs, ys, linestyle=":", color="#788C5D", linewidth=2.0, label="Sigmoid fit")
+    ax.set_xlabel(r"$\alpha$ (in $v=\mu_{fail}+\alpha\,d_{\Delta\mu}$)")
+    ax.set_ylabel("Detection rate")
+    ax.set_title("Synthetic threshold test")
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9, loc="center right")
+    plt.tight_layout()
+    plt.savefig(output_dir / "synthetic_threshold_test.pdf", bbox_inches="tight")
+    plt.savefig(output_dir / "synthetic_threshold_test.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    if verbose:
+        print(f"  Plot saved to {output_dir / 'synthetic_threshold_test.pdf'}")
+
+    return out
 
 
 def run_steering_experiment(
@@ -795,7 +970,7 @@ def create_plots(results: Dict, output_dir: Path, verbose: bool = True):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Experiment 40: Mean-Diff Direction Steering")
+    parser = argparse.ArgumentParser(description="Mean-Diff Analysis: Mean-Diff Direction Steering")
     parser.add_argument("--model", type=str, default="gemma3_27b", help="Model name")
     parser.add_argument("--layer", type=int, default=None, help="Layer index (default: 0.6 * n_layers)")
     parser.add_argument("--strengths", type=float, nargs="+", default=[-4.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0],
@@ -808,6 +983,25 @@ def main():
     parser.add_argument("--output-dir", type=str, default="analysis/04e_mean_diff_steering",
                         help="Output directory")
     parser.add_argument("--plots-only", action="store_true", help="Only regenerate plots from existing results")
+    # Appendix D: synthetic threshold test (v = mu_fail + alpha * d_Delta_mu).
+    parser.add_argument(
+        "--run-synthetic-threshold", action="store_true",
+        help="Run the synthetic-threshold test (Appendix D, \\Cref{figure:synthetic-threshold-test}) "
+             "instead of the default mean-diff style-steering experiment.",
+    )
+    parser.add_argument(
+        "--alpha-values", type=float, nargs="+",
+        default=[0.0, 0.25, 0.5, 0.75, 1.0, 1.15, 1.25, 1.5, 1.75, 2.0],
+        help="Alphas to sweep for the synthetic-threshold test.",
+    )
+    parser.add_argument(
+        "--synthetic-strength", type=float, default=4.0,
+        help="Base steering strength for the synthetic-threshold test (default: 4.0).",
+    )
+    parser.add_argument(
+        "--synthetic-n-trials", type=int, default=20,
+        help="Trials per alpha for the synthetic-threshold test.",
+    )
     args = parser.parse_args()
 
     # Setup output directory
@@ -853,6 +1047,25 @@ def main():
     else:
         layer_idx = args.layer
     print(f"Using layer {layer_idx} (of {model.n_layers})")
+
+    # If synthetic-threshold mode was requested, run that and exit before the
+    # main style-steering experiment.
+    if args.run_synthetic_threshold:
+        mu_success, mu_failure = _find_group_centroids(args.model)
+        st_out_dir = output_dir / "synthetic_threshold"
+        run_synthetic_threshold_experiment(
+            model=model,
+            mu_success=mu_success,
+            mu_failure=mu_failure,
+            layer_idx=layer_idx,
+            alpha_values=args.alpha_values,
+            strength=args.synthetic_strength,
+            n_trials=args.synthetic_n_trials,
+            output_dir=st_out_dir,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+        )
+        return
 
     # Select prompts
     if args.categories:

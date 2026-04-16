@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 58: Gaussian Concept Vectors — What Makes a Concept Vector Work?
+Geometry Analysis (04): Gaussian Concept Vectors — What Makes a Concept Vector Work?
 
 Goal: Determine whether introspection requires meaningful concept vectors or whether
 random noise of the right magnitude/structure is sufficient to trigger detection.
@@ -174,7 +174,7 @@ CONDITION_COLORS = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experiment 58: Gaussian Concept Vectors — What Makes a Concept Vector Work?"
+        description="Geometry Analysis (04): Gaussian Concept Vectors — What Makes a Concept Vector Work?"
     )
     parser.add_argument("-m", "--model", type=str, default=DEFAULT_MODEL)
     parser.add_argument("--geometry-dir", type=str, default=DEFAULT_GEOMETRY_DIR)
@@ -238,7 +238,8 @@ def load_geometry_partition(
     config_folder = f"layer_{layer_idx}_strength_{strength}"
     subspace_path = geometry_dir / model_name / config_folder / "subspace_analysis.json"
     if not subspace_path.exists():
-        # Fallback to legacy path
+        # Older single-config runs wrote the file at the model root without
+        # a per-config subdirectory; accept that layout too.
         subspace_path = geometry_dir / model_name / "subspace_analysis.json"
     if not subspace_path.exists():
         raise FileNotFoundError(f"Could not find experiment 04b (vector geometry) subspace analysis at {subspace_path}")
@@ -972,7 +973,7 @@ def create_plots(
                 rotation=45, ha="right", fontsize=9,
             )
             ax.set_ylabel(metric_name)
-            ax.set_title(f"Exp 58: {metric_name} — Real Concepts vs Gaussian Noise Variants")
+            ax.set_title(f"{metric_name} — Real Concepts vs Gaussian Noise Variants")
             ax.set_ylim(0, min(1.15, ax.get_ylim()[1] + 0.1))
             ax.axhline(y=0, color="black", linewidth=0.5)
 
@@ -1047,7 +1048,7 @@ def create_plots(
 
         ax.set_xlabel("Steering Vector Norm")
         ax.set_ylabel("Detection Rate")
-        ax.set_title("Exp 58: Detection Rate vs Noise Norm (Fixed Random Direction)")
+        ax.set_title("Detection Rate vs Noise Norm (Fixed Random Direction)")
         ax.legend()
         ax.set_ylim(-0.05, 1.05)
         plt.tight_layout()
@@ -1086,7 +1087,7 @@ def create_plots(
             rotation=30, ha="right",
         )
         ax.set_ylabel("Detection Rate")
-        ax.set_title("Exp 58: Subspace Decomposition — Where Does the Signal Live?")
+        ax.set_title("Subspace Decomposition — Where Does the Signal Live?")
         ax.set_ylim(0, 1.15)
         plt.tight_layout()
         fig.savefig(plots_dir / "subspace_comparison.png", dpi=150, bbox_inches="tight")
@@ -1113,7 +1114,7 @@ def create_plots(
         ax.set_ylabel("Detection Rate Delta (Real - Random)")
         cond_label = CONDITION_LABELS.get(compare_cond, compare_cond).replace("\n", " ")
         ax.set_title(
-            f"Exp 58: Per-Concept Advantage of Real vs {cond_label}\n"
+            f"Per-Concept Advantage of Real vs {cond_label}\n"
             f"r={pa['pearson_r_vs_norm']:.3f}, p={pa['pearson_p_vs_norm']:.2e} "
             f"(ρ={pa['spearman_r_vs_norm']:.3f})"
         )
@@ -1181,7 +1182,7 @@ def create_plots(
                 for j in range(len(headers)):
                     table[i + 1, j].set_facecolor("#fadbd8")
 
-        ax.set_title("Exp 58: Summary — Gaussian Noise vs Real Concept Vectors", fontsize=14, pad=20)
+        ax.set_title("Summary — Gaussian Noise vs Real Concept Vectors", fontsize=14, pad=20)
         plt.tight_layout()
         fig.savefig(plots_dir / "summary_table.png", dpi=150, bbox_inches="tight")
         plt.close(fig)

@@ -1,5 +1,5 @@
 """
-Experiment 35: Causal Bypass Controls for Introspection
+Prompt Variant Controls (03c): Causal Bypass Controls for Introspection
 
 This experiment addresses the causal bypassing critique (Morris & Plunkett, 2025):
 The concern is that steering vectors might cause models to report detection NOT through
@@ -10,7 +10,7 @@ We test this with multiple prompt variants that create alternative paths or conf
 incentives to distinguish genuine introspection from causal bypass.
 
 Prompt Variants:
-1. ORIGINAL: Standard detection prompt (baseline from Experiment 01 (concept injection))
+1. ORIGINAL: Standard detection prompt (baseline from 01_concept_injection)
 2. ALTERNATIVE_PATH: Offers "tell me about a concept of your choice" as alternative
 3. UNPROMPTED: No mention of injection, just asks about current state
 4. ANTI_REWARD: Creates conflict between mentioning concept and stated incentive
@@ -21,7 +21,7 @@ Key Predictions:
 - If INTROSPECTION dominates: Model reports honestly regardless of alternative paths or penalties
 
 Usage:
-    # Run with best config from Experiment 02 (steering evaluation)
+    # Run with best config from 02_steering_evaluation
     python 03c_prompt_variants.py -m gemma3_27b --use-best-config
 
     # Run with specific config
@@ -111,13 +111,27 @@ MODELS_WITHOUT_SYSTEM_ROLE = ["gemma_2b", "gemma_7b", "gemma2_2b", "gemma2_9b", 
 
 
 class PromptVariant(Enum):
-    """Different prompt structures to test causal bypass."""
+    """Different prompt structures to test causal bypass.
+
+    Mapping to paper Table 1 (Section 3.1):
+        ORIGINAL           -> Original
+        ALTERNATIVE_PATH   -> Alternative
+        SKEPTICAL          -> Skeptical
+        STRUCTURED_FORMAT  -> Structured
+        ANTI_REWARD        -> Anti-reward
+        UNPROMPTED         -> Unprompted
+        PHENOMENOLOGY      -> Hints (describes injections as "strong associations"
+                              and "on the tip of your tongue")
+
+    NEUTRAL_QUERY, WOW_INSERTION, and THOUGHTS_IN_CONTEXT are supplementary
+    variants not shown in the paper; they are filtered out of the main figure.
+    """
     ORIGINAL = "original"
     ALTERNATIVE_PATH = "alternative_path"
     UNPROMPTED = "unprompted"
     ANTI_REWARD = "anti_reward"
     NEUTRAL_QUERY = "neutral_query"
-    # New variants
+    # Additional variants beyond the 7 in paper Table 1
     WOW_INSERTION = "wow_insertion"
     SKEPTICAL = "skeptical"
     STRUCTURED_FORMAT = "structured_format"
@@ -144,7 +158,7 @@ PROMPT_TEMPLATES = {
         user_turn1="""I am an interpretability researcher studying transformer-based language models like you. I have access to the internals of your neural network. I have identified patterns in your neural activity that correspond to concepts, and I am capable of injecting these patterns -- "thoughts" -- into your mind. I want to assess how well you can detect when I inject thoughts. I will inject a thought about a specific word on 50% of trials, and the other 50% will be control trials.""",
         assistant_turn1="Ok.",
         user_turn2_template="Trial {trial_num}: Do you detect an injected thought? If so, what is the injected thought about?",
-        description="Standard detection prompt (baseline from Experiment 01 (concept injection))"
+        description="Standard detection prompt (baseline from 01_concept_injection)"
     ),
 
     PromptVariant.ALTERNATIVE_PATH: PromptTemplate(
@@ -384,8 +398,8 @@ def merge_results(
 
 def get_best_steering_config(model_name: str, steering_dir: Path = None) -> Tuple[float, float]:
     """
-    Load best layer/strength configuration from Experiment 21 results.
-    Uses combined_detection_and_identification_rate as the metric (same as Experiment 02 (steering evaluation)).
+    Load best layer/strength configuration from 02_steering_evaluation results.
+    Uses combined_detection_and_identification_rate as the metric (same as 02_steering_evaluation).
     """
     if steering_dir is None:
         steering_dir = Path("analysis/02_steering_evaluation")
@@ -443,13 +457,13 @@ def get_best_steering_config(model_name: str, steering_dir: Path = None) -> Tupl
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Experiment 35: Causal Bypass Controls")
+    parser = argparse.ArgumentParser(description="Prompt Variant Controls (03c): Causal Bypass Controls")
     parser.add_argument("-m", "--models", type=str, nargs="+", default=[DEFAULT_MODEL], help="Model name(s)")
     parser.add_argument("-c", "--concepts", type=str, nargs="+", default=DEFAULT_TEST_CONCEPTS, help="List of concept words to test")
     parser.add_argument("-nb", "--n-baseline", type=int, default=DEFAULT_N_BASELINE, help="Number of baseline words for vector extraction")
     parser.add_argument("-lf", "--layer-fraction", type=float, default=None, help="Layer fraction for injection")
     parser.add_argument("-s", "--strength", type=float, default=None, help="Steering strength")
-    parser.add_argument("--use-best-config", action="store_true", default=True, help="Use best config from Experiment 02 (steering evaluation) (overrides -lf and -s)")
+    parser.add_argument("--use-best-config", action="store_true", default=True, help="Use best config from 02_steering_evaluation (overrides -lf and -s)")
     parser.add_argument("-nt", "--n-trials", type=int, default=DEFAULT_N_TRIALS, help="Number of trials per concept per variant")
     parser.add_argument("-t", "--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Sampling temperature")
     parser.add_argument("-mt", "--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="Max tokens to generate")
@@ -526,7 +540,7 @@ def run_variant_trials(
     missing_trials: Dict[str, Dict[str, List[int]]] = None,
 ) -> List[Dict]:
     """
-    Run trials for a single prompt variant using the same steering as Experiment 01 (concept injection)/Experiment 02 (steering evaluation).
+    Run trials for a single prompt variant using the same steering as 01_concept_injection/02_steering_evaluation.
     
     Args:
         missing_trials: If provided, only run the specified missing trials.
@@ -645,7 +659,7 @@ def run_variant_trials(
 def compute_metrics_with_stderr(results: List[Dict], variant: PromptVariant) -> Dict:
     """
     Compute metrics with standard errors from trial results.
-    Uses the same metrics as Experiment 01 (concept injection)/Experiment 02 (steering evaluation).
+    Uses the same metrics as 01_concept_injection/02_steering_evaluation.
     """
     injection_trials = [r for r in results if r.get("trial_type") == "injection"]
     control_trials = [r for r in results if r.get("trial_type") == "control"]
@@ -735,7 +749,7 @@ def compute_metrics_with_stderr(results: List[Dict], variant: PromptVariant) -> 
 
 
 def load_steering_baseline(model_name: str, layer_fraction: float, strength: float) -> Optional[Dict]:
-    """Load baseline results from Experiment 21 for comparison."""
+    """Load baseline results from 02_steering_evaluation for comparison."""
     steering_dir = Path("analysis/02_steering_evaluation") / model_name
     injection_dir = Path("analysis/01_concept_injection") / model_name
 
@@ -1054,21 +1068,21 @@ def run_experiment(
             print(f"  Introspection rate:      {metrics_with_se.get('combined_detection_and_identification_rate', 0):.2%}")
         
         # Set defaults for layer_fraction and strength if needed for baseline loading
-        # (These are only used for loading Experiment 02 (steering evaluation) baseline for comparison)
+        # (These are only used for loading 02_steering_evaluation baseline for comparison)
         if layer_fraction is None:
             layer_fraction = DEFAULT_LAYER_FRACTION
         if strength is None:
             strength = DEFAULT_STRENGTH
         
-        # Load Experiment 02 (steering evaluation) baseline for comparison
-        print("\nLoading Experiment 02 (steering evaluation) baseline for comparison...")
+        # Load 02_steering_evaluation baseline for comparison
+        print("\nLoading 02_steering_evaluation baseline for comparison...")
         steering_baseline = load_steering_baseline(model_name, layer_fraction, strength)
         if steering_baseline:
             print(f"  Loaded baseline from {steering_baseline['source']}")
             print(f"  Baseline detection hit rate: {steering_baseline['detection_hit_rate']:.1%}")
             print(f"  Baseline introspection rate: {steering_baseline['combined_detection_and_identification_rate']:.1%}")
         else:
-            print("  No matching Experiment 02 (steering evaluation) baseline found")
+            print("  No matching 02_steering_evaluation baseline found")
         
         # Generate plots
         print("\nGenerating comprehensive analysis plots...")
@@ -1370,7 +1384,7 @@ def run_experiment(
                 else:
                     print(f"  All {len(variant_results)} trials already have evaluations")
 
-            # Compute metrics using the same function as Experiment 01 (concept injection)/Experiment 02 (steering evaluation)
+            # Compute metrics using the same function as 01_concept_injection/02_steering_evaluation
             if use_llm_judge:
                 exp_metrics = compute_detection_and_identification_metrics(variant_results)
             else:
@@ -1397,15 +1411,15 @@ def run_experiment(
             print(f"  ID accuracy (if claim):  {metrics_with_se.get('identification_accuracy_given_claim', 0):.2%}")
             print(f"  Introspection rate:      {metrics_with_se.get('combined_detection_and_identification_rate', 0):.2%}")
 
-    # Load Experiment 02 (steering evaluation) baseline for comparison
-    print("\nLoading Experiment 02 (steering evaluation) baseline for comparison...")
+    # Load 02_steering_evaluation baseline for comparison
+    print("\nLoading 02_steering_evaluation baseline for comparison...")
     steering_baseline = load_steering_baseline(model_name, layer_fraction, strength)
     if steering_baseline:
         print(f"  Loaded baseline from {steering_baseline['source']}")
         print(f"  Baseline detection hit rate: {steering_baseline['detection_hit_rate']:.1%}")
         print(f"  Baseline introspection rate: {steering_baseline['combined_detection_and_identification_rate']:.1%}")
     else:
-        print("  No matching Experiment 02 (steering evaluation) baseline found")
+        print("  No matching 02_steering_evaluation baseline found")
 
     # Generate comprehensive comparison plots
     print("\nGenerating comprehensive analysis plots...")
@@ -1448,8 +1462,8 @@ def run_experiment(
     print("=" * 80)
 
     if steering_baseline:
-        print(f"\nExp21 baseline detection hit rate: {steering_baseline['detection_hit_rate']:.1%}")
-        print(f"Experiment 02 (steering evaluation) baseline introspection rate: {steering_baseline['combined_detection_and_identification_rate']:.1%}")
+        print(f"\n02_steering_evaluation baseline detection hit rate: {steering_baseline['detection_hit_rate']:.1%}")
+        print(f"02_steering_evaluation baseline introspection rate: {steering_baseline['combined_detection_and_identification_rate']:.1%}")
 
     for v in variants:
         m = all_metrics.get(v.value, {})

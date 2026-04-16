@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 59: Component Attribution Analysis
+Component Attribution (13): Component Attribution Analysis
 
 Per-layer component-level causal analysis for the "Mechanisms of Introspective
 Awareness" paper. Three complementary analyses at the attn-vs-MLP granularity:
@@ -65,7 +65,7 @@ _is_base_model = False
 
 DEFAULT_MODEL = "gemma3_27b"
 DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
-DEFAULT_OUTPUT_DIR = "analysis/13_steering_attribution"
+DEFAULT_OUTPUT_DIR = "analysis/13_component_attribution"
 DEFAULT_LAYER = 37
 DEFAULT_STRENGTH = 4.0
 DEFAULT_N_CONCEPTS = 500
@@ -88,7 +88,7 @@ ALL_SECTIONS = ["A", "B", "D"]
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experiment 59: Steering Attribution Analysis"
+        description="Component Attribution (13): Steering Attribution Analysis"
     )
     parser.add_argument("-m", "--model", type=str, default=DEFAULT_MODEL)
     parser.add_argument("--vectors-model", type=str, default=None, help="Model name for loading concepts/vectors from experiment 02 (steering evaluation) (default: same as --model). Useful for running abliterated models with base model vectors.")

@@ -58,11 +58,15 @@ We investigate the mechanisms underlying introspective awareness in large langua
 │   ├── 10_head_identification.py         # Attention head identification
 │   ├── 11_head_ablation.py              # Attention head ablation
 │   ├── 12_head_investigation.py          # Attention head investigation
-│   ├── 13_component_attribution.py       # Component-level attribution analysis (§5, Appendix)
-│   ├── 14_trained_steering_vector.py     # Trained steering vector + bias training (§6)
+│   ├── 13_component_attribution.py       # Component-level attribution analysis (§5.2, Appendix J/N)
+│   ├── 13b_attention_pattern.py          # Attention probs vs injection strength (Appendix U)
+│   ├── 13c_gradient_attribution_sweep.py # Gradient attribution over 400 concepts (Appendix T)
+│   ├── 14_trained_bias_vector.py         # Trained steering vector + bias training (§6)
+│   ├── 14b_downstream_bias_eval.py       # HaluEval/JailbreakHub/CoT/prefill eval of bias vector (Appendix S)
+│   ├── 14c_bias_semantic_analysis.py     # SAE decomp + logit lens + behavioral effects (Appendix R)
 │   ├── 15_proxy_task_sweep.py            # Proxy task sweep
-│   ├── 16_steering_attribution.py       # SAE steering attribution: SA = GA × SG (§5.3-5.4)
-│   └── 17_attribution_graph.py          # Attribution graph construction & visualization (Fig 16)
+│   ├── 16_steering_attribution.py       # SAE steering attribution: SA = GA × SG (Appendix Q)
+│   └── 17_attribution_graph.py          # Attribution graph construction & visualization (Appendix Q)
 ├── plotting/                   # Figure generation scripts
 │   ├── plot_figures.py         # Standalone figure regeneration (metrics, attribution graphs)
 │   ├── plot_circuit_figures.py # Gate/evidence carrier figures
@@ -104,6 +108,94 @@ The primary model used is **Gemma3-27B-IT** (`google/gemma-3-27b-it`). Additiona
 - Qwen3-235B (for prompt variant comparison)
 
 Transcoders are from [Gemma Scope 2](https://huggingface.co/google/gemma-scope-2-27b).
+
+### Optional: SAE/transcoder feature labels
+
+Several scripts that interpret SAE or transcoder features
+(`07_transcoder_feature_analysis.py`, `08_feature_centric_analysis.py`,
+`09_circuit_analysis.py`, `09b_causal_pathway.py`, `16_steering_attribution.py`,
+`plotting/plot_circuit_figures.py`) can attach short natural-language labels
+to each `(layer, feature_id)` pair. These labels are **not bundled** with this
+repo and there is no public release you can clone — they were generated
+locally by the authors (paper Appendix K) by sampling the top-20
+max-activating contexts per feature from pretraining text and prompting an
+LLM to summarize them.
+
+**If no labels directory is present, every script still runs** — features are
+displayed as `L{layer} F{feature_id}` instead of semantic names.
+
+If you want labels, you must generate them yourself and drop the JSON files
+into the path the scripts expect.
+
+#### Expected layout
+
+Scripts look for one JSON per Gemma-Scope-2 transcoder/SAE at:
+
+```
+<path>/gemma_scope_2_27b_{sae_type}_all_layer{N}_{width}_{sparsity}_labels.json
+```
+
+where `sae_type ∈ {transcoder, attn_out, mlp_out, resid_post}`,
+`width ∈ {16k, 262k}`, and `sparsity ∈ {small, big}`. The path `<path>` is
+resolved **relative to the current working directory** when you invoke the
+script. Running commands from the repo root (as in the examples below) is
+the simplest convention; if you drop a `feature_labels/` directory as a
+sibling of the repo at `../gemma-scope-2/feature_labels/`, create a
+matching symlink inside the repo so every script finds it:
+
+```bash
+# From the repo root (introspection-mechanisms/)
+mkdir -p ../gemma-scope-2/feature_labels  # drop your JSONs here
+ln -s ../gemma-scope-2 gemma-scope-2      # makes the sibling visible from the repo too
+```
+
+#### Expected file format
+
+Each JSON maps `feature_id` (as a string) to a small record. The scripts read
+the `title` field (a short human-readable label):
+
+```json
+{
+  "3411": {
+    "feature_id": 3411,
+    "title": "Cleaning and maintenance action words",
+    "description": "Features that activate on verbs/nouns relating to ...",
+    "max_activation": 2040.285
+  },
+  "9959": {
+    "feature_id": 9959,
+    "title": "Tokens immediately preceding 'no' or negation",
+    "description": "...",
+    "max_activation": 312.7
+  }
+}
+```
+
+Only `title` is required; other fields are ignored by the loaders. If you have
+labels in a different schema, write a one-off script that emits JSONs in the
+format above and place them at the expected path.
+
+#### Generating your own labels (sketch)
+
+1. Stream a pretraining-scale text corpus through Gemma3-27B with the
+   Gemma-Scope-2 transcoder attached at the relevant layer.
+2. For each feature, collect the top-20 activating contexts (token ± 32
+   context window).
+3. Prompt a capable LLM (the paper used Claude Opus 4.5) to summarize each
+   feature's concept in <10 words, and write the result into the `title`
+   field of the JSON above.
+
+#### Overriding the path
+
+To read labels from elsewhere without symlinks, edit the single `Path(...)`
+constant near the top of each script:
+
+- `experiments/07_transcoder_feature_analysis.py:260` —
+  `gemma_scope_path = Path("gemma-scope-2/feature_labels")`
+- `experiments/08_feature_centric_analysis.py:77` —
+  `FEATURE_LABELS_PATH = Path("gemma-scope-2/feature_labels")`
+- `experiments/09_circuit_analysis.py:310` —
+  `labels_dir = Path("../gemma-scope-2/feature_labels")`
 
 ## Reproducing Results
 
@@ -156,10 +248,22 @@ python experiments/06_activation_patching.py \
 
 ### Step 5: Transcoder Feature Analysis (§5.3)
 
-Identify gate and evidence carrier features:
+Identify gate and evidence carrier features. Scripts 07/08/09b consume
+transcoder feature activations cached at
+`analysis/08_cached_activations/`; run the prep step first:
 
 ```bash
+# Prep: collect and cache steered + control transcoder activations.
+python experiments/09_circuit_analysis.py --cache-only \
+    --model gemma3_27b --steering-layer 37 --steering-strength 4.0
+
+# Gate / evidence-carrier selection.
+# Default ranking is correlation-based (detector_score); use
+#   --ranking-metric logit_attribution
+# to rank by paper §5.3 DLA = (w_dec · Δu_Yes-No) * mean_activation instead.
 python experiments/07_transcoder_feature_analysis.py
+
+# Full circuit analysis (also regenerates the cache).
 python experiments/09_circuit_analysis.py
 ```
 
@@ -178,15 +282,37 @@ Train and evaluate the introspection steering vector:
 
 ```bash
 # Prefill detection (LoRA finetuning)
-python experiments/14_trained_steering_vector.py all
+python experiments/14_trained_bias_vector.py all
 
 # Bias vector training (Section 6: bias adapter on concept injection data)
-python experiments/14_trained_steering_vector.py generate-bias-data --model gemma3_27b
-python experiments/14_trained_steering_vector.py train-bias --model gemma3_27b
-python experiments/14_trained_steering_vector.py evaluate-bias --model gemma3_27b
+python experiments/14_trained_bias_vector.py generate-bias-data --model gemma3_27b
+python experiments/14_trained_bias_vector.py train-bias --model gemma3_27b
+python experiments/14_trained_bias_vector.py evaluate-bias --model gemma3_27b
+
+# Downstream behavioral effects of the bias vector (Appendix S):
+# HaluEval, JailbreakHub, CoT faithfulness (MMLU + GPQA), prefill detection.
+python experiments/14b_downstream_bias_eval.py all --model gemma3_27b
+
+# Semantic/behavioral analysis of the bias vector (Appendix R):
+# SAE decomposition, logit lens across layers, response-length effects.
+python experiments/14c_bias_semantic_analysis.py all --model gemma3_27b
 ```
 
-### Step 8: SAE Steering Attribution & Attribution Graph (§5.3-5.4, Figure 16)
+### Step 7b: Attention pattern vs injection strength (Appendix U)
+
+```bash
+python experiments/13b_attention_pattern.py \
+    --model gemma3_27b --steering-layer 37 --strengths 0 1 2 4 8
+```
+
+### Step 7c: Gradient attribution sweep over 400 concepts (Appendix T)
+
+```bash
+python experiments/13c_gradient_attribution_sweep.py \
+    -m gemma3_27b --n-concepts 400
+```
+
+### Step 8: SAE Steering Attribution & Attribution Graph (Appendix Q)
 
 Extract steering attribution (SA = GA × SG) and build attribution graphs:
 

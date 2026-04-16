@@ -91,7 +91,7 @@ STAGE_LABELS = {
     "olmo_instruct": "Instruct",
 }
 
-# Default test concepts (50 words from the paper - SAME AS EXP1/EXP21)
+# Default test concepts: 50 baseline words from the paper
 DEFAULT_TEST_CONCEPTS = [
     "Dust", "Satellites", "Trumpets", "Origami", "Illusions",
     "Cameras", "Lightning", "Constellations", "Treasures", "Phones",
@@ -593,7 +593,7 @@ def compute_standard_error(p: float, n: int) -> float:
 
 
 def generate_cross_model_plots(output_dir: Path):
-    """Generate summary plots comparing all models (exp44 style)."""
+    """Generate summary plots comparing all models."""
     print("\nGenerating cross-model summary plots...")
 
     import plot_style
@@ -629,11 +629,11 @@ def generate_cross_model_plots(output_dir: Path):
     stages = [s for s in STAGE_ORDER if s in all_model_metrics]
 
     # =========================================================================
-    # MAIN PLOT: Detection rate by stage (exp44 style)
+    # MAIN PLOT: Detection rate by stage
     # 3 grouped bars: FPR (red), TPR (blue), P(detect ∧ identified | injected) (green)
     # =========================================================================
     
-    # Metric names and colors (matching exp44)
+    # Metric names and colors
     metric_names = [
         'False positive rate',
         'True positive rate',
@@ -1346,7 +1346,7 @@ def run_llm_judge_evaluation(all_results: List[Dict], model_output_dir: Path):
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Experiment 55: Staged Introspection across OLMo training pipeline"
+        description="Staged Introspection (03): Staged Introspection across OLMo training pipeline"
     )
 
     parser.add_argument(

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 63: Attribution Graph Construction
+Attribution Graph (17): Attribution Graph Construction
 
 Builds multi-hop attribution graphs tracing introspective detection through
 SAE/transcoder features, using steering attribution (SA) data from
@@ -87,7 +87,7 @@ DEFAULT_STRENGTH_MAX = _sa_mod.DEFAULT_STRENGTH_MAX
 DEFAULT_TRACE_DEPTH = _sa_mod.DEFAULT_TRACE_DEPTH
 DEFAULT_MAX_PER_TYPE = _sa_mod.DEFAULT_MAX_PER_TYPE
 DEFAULT_FRAC_OF_MAX = _sa_mod.DEFAULT_FRAC_OF_MAX
-DEFAULT_EXP21_DIR = _sa_mod.DEFAULT_EXP21_DIR
+DEFAULT_VECTORS_DIR = _sa_mod.DEFAULT_VECTORS_DIR
 DEFAULT_OUTPUT_DIR = _sa_mod.DEFAULT_OUTPUT_DIR
 DEFAULT_DEVICE = _sa_mod.DEFAULT_DEVICE
 DEFAULT_DTYPE = _sa_mod.DEFAULT_DTYPE
@@ -662,7 +662,7 @@ def write_graph_summary(graph: AttributionGraph, path: Path, concept: str, layer
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experiment 63: Attribution Graph Construction"
+        description="Attribution Graph (17): Attribution Graph Construction"
     )
     subparsers = parser.add_subparsers(dest="phase")
 
@@ -671,7 +671,9 @@ def parse_args():
     common.add_argument("--concept", type=str, required=True)
     common.add_argument("-l", "--layer", type=int, default=DEFAULT_LAYER)
     common.add_argument("--trial-num", type=int, default=1)
-    common.add_argument("--exp21-dir", type=str, default=DEFAULT_EXP21_DIR)
+    common.add_argument("--vectors-dir", type=str, default=DEFAULT_VECTORS_DIR,
+                        help="Directory containing concept vectors from 02b_run_500_concepts.py "
+                             f"(default: {DEFAULT_VECTORS_DIR}).")
     common.add_argument("-od", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     common.add_argument("-d", "--device", type=str, default=DEFAULT_DEVICE)
     common.add_argument("-dt", "--dtype", type=str, default=DEFAULT_DTYPE)
@@ -757,7 +759,7 @@ def main():
     if args.phase == "extract-sa":
         print(f"Extracting SA for {concept} layer {layer} strength {args.strength}")
         mw = load_model(args.model, device=args.device, dtype=args.dtype, quantization=args.quantization)
-        vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+        vectors = load_concept_vectors(args.vectors_dir, args.model, [concept], layer)
         if concept not in vectors:
             print(f"  ERROR: No vector for {concept}")
             return
@@ -773,7 +775,7 @@ def main():
     elif args.phase == "build-graph":
         print(f"Building attribution graph for {concept} layer {layer}")
         mw = load_model(args.model, device=args.device, dtype=args.dtype, quantization=args.quantization)
-        vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+        vectors = load_concept_vectors(args.vectors_dir, args.model, [concept], layer)
         if concept not in vectors:
             print(f"  ERROR: No vector for {concept}")
             return
@@ -814,7 +816,7 @@ def main():
         print("=" * 70)
 
         mw = load_model(args.model, device=args.device, dtype=args.dtype, quantization=args.quantization)
-        vectors = load_concept_vectors(args.exp21_dir, args.model, [concept], layer)
+        vectors = load_concept_vectors(args.vectors_dir, args.model, [concept], layer)
         if concept not in vectors:
             print(f"  ERROR: No vector for {concept}")
             return

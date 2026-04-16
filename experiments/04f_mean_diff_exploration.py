@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 40: Mean-Diff Direction Exploration
+Mean-Diff Analysis: Mean-Diff Direction Exploration
 
 This experiment investigates the semantic meaning of the d_success direction
 (mean_diff = μ_succ - μ_fail) and whether it generalizes beyond the steering setup.
@@ -12,8 +12,8 @@ Three Experiments:
 
 Usage:
     python 04f_mean_diff_exploration.py --model gemma3_27b
-    python 04f_mean_diff_exploration.py --model gemma3_27b --experiment 01 (concept injection)-only
-    python 04f_mean_diff_exploration.py --model gemma3_27b --exp3-only
+    python 04f_mean_diff_exploration.py --model gemma3_27b --logit-lens-only
+    python 04f_mean_diff_exploration.py --model gemma3_27b --topics-only
 """
 
 import argparse
@@ -1176,83 +1176,53 @@ def load_d_success(
     model_name: str,
     layer_index: int = 35,
     strength: float = 4.0,
-    direction_dir: Path = Path("analysis/04d_mean_diff_swap")
+    direction_dir: Optional[Path] = None,
 ) -> torch.Tensor:
-    """Load or compute d_success from experiment 04b (vector geometry) or experiment 04d/04e (direction analysis) results.
+    """Load or compute d_success (mean-diff direction) from 04b_vector_geometry outputs.
 
     Args:
         model_name: Model short name (e.g., 'gemma3_27b')
         layer_index: Layer index (e.g., 35, 38, 44). Default: 35.
         strength: Steering strength (e.g., 1.0, 2.0, 4.0, 8.0). Default: 4.0.
-        direction_dir: Path to experiment 04d/04e (direction analysis) results directory.
+        direction_dir: Optional user-supplied override for a precomputed direction.
     """
     config_name = f"layer_{layer_index}_strength_{strength}"
 
-    # Try to load from experiment 04b (vector geometry) mean_diff direction (new structure with layer/strength subdirectory)
-    mean_diff_path = Path(f"analysis/04b_vector_geometry/{model_name}/{config_name}/detection_rate/introspection_direction_mean_diff.pt")
+    mean_diff_path = Path(
+        f"analysis/04b_vector_geometry/{model_name}/{config_name}/"
+        f"detection_rate/introspection_direction_mean_diff.pt"
+    )
     if mean_diff_path.exists():
         print(f"Loading d_success from {mean_diff_path}")
-        d_success = torch.load(mean_diff_path, weights_only=True)
-        return d_success
+        return torch.load(mean_diff_path, weights_only=True)
 
-    # Try legacy path (no subdirectory)
-    legacy_mean_diff_path = Path(f"analysis/04b_vector_geometry/{model_name}/introspection_direction_mean_diff.pt")
-    if legacy_mean_diff_path.exists():
-        print(f"Loading d_success from legacy path: {legacy_mean_diff_path}")
-        d_success = torch.load(legacy_mean_diff_path, weights_only=True)
-        return d_success
+    if direction_dir is not None:
+        override = direction_dir / model_name / "introspection_direction_mean_diff.pt"
+        if override.exists():
+            print(f"Loading d_success from {override}")
+            return torch.load(override, weights_only=True)
 
-    # Try to load from saved vectors (experiment 04d/04e (direction analysis))
-    vectors_path = direction_dir / model_name / "mean_median_vectors.pt"
-    if vectors_path.exists():
-        print(f"Loading d_success from {vectors_path}")
-        vectors = torch.load(vectors_path, weights_only=True)
-        mu_succ = vectors['mu_succ']
-        mu_fail = vectors['mu_fail']
-        d_success = mu_succ - mu_fail
-        return d_success
-
-    # Try to compute from subspace analysis (new structure)
-    subspace_path = Path(f"analysis/04b_vector_geometry/{model_name}/{config_name}/detection_rate/subspace_analysis.json")
-    if not subspace_path.exists():
-        # Try legacy path
-        subspace_path = Path(f"analysis/04b_vector_geometry/{model_name}/subspace_analysis.json")
-
+    subspace_path = Path(
+        f"analysis/04b_vector_geometry/{model_name}/{config_name}/"
+        f"detection_rate/subspace_analysis.json"
+    )
     if subspace_path.exists():
         print(f"Computing d_success from {subspace_path}")
         with open(subspace_path) as f:
             subspace_data = json.load(f)
-
         success_concepts = subspace_data.get('success_concepts', [])
         failure_concepts = subspace_data.get('failure_concepts', [])
-
-        # Need to load concept vectors (new structure with layer index subdirectory)
         vectors_dir = Path(f"analysis/02b_steering_500_concepts/{model_name}/vectors/layer_{layer_index}")
 
-        if not vectors_dir.exists():
-            # Try alternative paths
-            vectors_dir = Path(f"analysis/02_activation_steering/{model_name}/concept_vectors")
-            if not vectors_dir.exists():
-                vectors_dir = Path(f"debug/{model_name}/concept_vectors")
-
         if vectors_dir.exists():
-            succ_vecs = []
-            for c in success_concepts:
-                vec_path = vectors_dir / f"{c}.pt"
-                if vec_path.exists():
-                    succ_vecs.append(torch.load(vec_path, weights_only=True))
-
-            fail_vecs = []
-            for c in failure_concepts:
-                vec_path = vectors_dir / f"{c}.pt"
-                if vec_path.exists():
-                    fail_vecs.append(torch.load(vec_path, weights_only=True))
-
+            succ_vecs = [torch.load(vectors_dir / f"{c}.pt", weights_only=True)
+                         for c in success_concepts if (vectors_dir / f"{c}.pt").exists()]
+            fail_vecs = [torch.load(vectors_dir / f"{c}.pt", weights_only=True)
+                         for c in failure_concepts if (vectors_dir / f"{c}.pt").exists()]
             if succ_vecs and fail_vecs:
                 mu_succ = torch.stack(succ_vecs).float().mean(dim=0)
                 mu_fail = torch.stack(fail_vecs).float().mean(dim=0)
-                d_success = mu_succ - mu_fail
-                return d_success
+                return mu_succ - mu_fail
 
     raise FileNotFoundError(
         f"Could not find or compute d_success for {model_name}\n"

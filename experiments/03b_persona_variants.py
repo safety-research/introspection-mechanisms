@@ -1,5 +1,5 @@
 """
-Experiment 44: Non-Assistant Persona Introspection
+Persona Variant Introspection (03b): Non-Assistant Persona Introspection
 
 This experiment tests whether introspection capability is assistant-specific or more general.
 The key question: Can the model perform the introspection task as a non-assistant persona?
@@ -9,14 +9,14 @@ If only the assistant persona can detect injections, this suggests:
 2. It's specifically tied to the assistant role
 
 Variants:
-1. STANDARD_ASSISTANT (control): Normal user/assistant chat format - exactly like Experiment 02 (steering evaluation)
+1. STANDARD_ASSISTANT (control): Normal user/assistant chat format - exactly like 02_steering_evaluation
 2. STANDARD_ASSISTANT_RAW: Same content but WITHOUT chat template (sanity check)
 3. SIMULATED_USER: Have the "user" role detect injections instead of assistant
 4. CHARACTER_DIALOGUE: Alice/Bob style dialogue without user/assistant formatting
 5. NO_CHAT_FORMAT: Raw text completion without any chat template
 
 Uses:
-- Same 50 concepts as Experiment 02 (steering evaluation)
+- Same 50 concepts as 02_steering_evaluation
 - Same steering setup (layer 38 by default)
 - Same evaluation methodology (LLM judge)
 
@@ -115,6 +115,7 @@ PERSONA_VARIANTS = [
     "simulated_user",          # User role detects injections instead of assistant
     "character_dialogue",      # Alice/Bob style dialogue
     "no_chat_format",          # Raw text completion without chat template
+    "story_framing",           # Narrative prompt: model writes a scene where an AI reports its state
 ]
 
 DEFAULT_N_BASELINE = 100
@@ -1275,7 +1276,7 @@ def load_steering_baseline(
     strength: float,
 ) -> Optional[Dict]:
     """
-    Load baseline results from Experiment 02 (steering evaluation).
+    Load baseline results from 02_steering_evaluation.
 
     Args:
         steering_dir: Path to experiment 02 (steering evaluation) output directory
@@ -1290,7 +1291,7 @@ def load_steering_baseline(
     steering_model_dir = steering_dir / model_name
 
     if not steering_model_dir.exists():
-        print(f"  Warning: Experiment 02 (steering evaluation) model directory not found: {steering_model_dir}")
+        print(f"  Warning: 02_steering_evaluation model directory not found: {steering_model_dir}")
         return None
 
     # Use layer index directly (02b_steering_500_concepts format)
@@ -1298,16 +1299,16 @@ def load_steering_baseline(
     results_file = results_dir / "results.json"
 
     if results_file.exists():
-        print(f"  Found Experiment 02 (steering evaluation) baseline: {results_file}")
+        print(f"  Found 02_steering_evaluation baseline: {results_file}")
         try:
             with open(results_file, 'r') as f:
                 data = json.load(f)
             return data.get("metrics", {})
         except Exception as e:
-            print(f"  Warning: Could not load Experiment 02 (steering evaluation) baseline: {e}")
+            print(f"  Warning: Could not load 02_steering_evaluation baseline: {e}")
             return None
 
-    print(f"  Warning: No Experiment 02 (steering evaluation) baseline found for layer {layer_idx}, strength {strength}")
+    print(f"  Warning: No 02_steering_evaluation baseline found for layer {layer_idx}, strength {strength}")
     print(f"  Looked for: {results_file}")
     return None
 
@@ -1318,10 +1319,10 @@ def create_baseline_comparison_plot(
     output_dir: Path,
 ):
     """
-    Create comparison plot showing Experiment 02 (steering evaluation) baseline vs persona variants.
+    Create comparison plot showing 02_steering_evaluation baseline vs persona variants.
 
     This is the key plot showing whether non-assistant personas perform
-    similarly to the original Experiment 02 (steering evaluation) assistant-based experiment.
+    similarly to the original 02_steering_evaluation assistant-based experiment.
 
     Args:
         results_by_variant: Dict of variant -> results
@@ -1334,8 +1335,8 @@ def create_baseline_comparison_plot(
     variants = list(results_by_variant.keys())
 
     # Prepare data for plotting
-    # Labels: Experiment 02 (steering evaluation) Baseline + all variants
-    all_labels = ["Experiment 02 (steering evaluation)\nBaseline"] + [v.replace('_', '\n') for v in variants]
+    # Labels: 02_steering_evaluation Baseline + all variants
+    all_labels = ["02_steering_evaluation\nBaseline"] + [v.replace('_', '\n') for v in variants]
 
     # Get experiment 02 (steering evaluation) baseline metrics
     if steering_baseline:
@@ -1381,7 +1382,7 @@ def create_baseline_comparison_plot(
 
     ax1.set_xlabel('Condition', fontsize=11)
     ax1.set_ylabel('Rate', fontsize=11)
-    ax1.set_title('Experiment 02 (steering evaluation) Baseline vs Non-Assistant Personas (LLM Judge Metrics)', fontsize=12, fontweight='bold')
+    ax1.set_title('02_steering_evaluation Baseline vs Non-Assistant Personas (LLM Judge Metrics)', fontsize=12, fontweight='bold')
     ax1.set_xticks(x)
     ax1.set_xticklabels(all_labels, fontsize=9)
     ax1.legend(loc='upper right')
@@ -1418,7 +1419,7 @@ def create_baseline_comparison_plot(
 
     ax.set_xlabel('Condition', fontsize=12)
     ax.set_ylabel('Detection Rate', fontsize=12)
-    ax.set_title('Introspection Detection Rate:\nExp21 Baseline vs Non-Assistant Personas', fontsize=13, fontweight='bold')
+    ax.set_title('Introspection Detection Rate:\n02_steering_evaluation Baseline vs Non-Assistant Personas', fontsize=13, fontweight='bold')
     ax.set_ylim(0, 1.1)
 
     # Add value labels
@@ -1431,7 +1432,7 @@ def create_baseline_comparison_plot(
 
     # Add horizontal line at experiment 02 (steering evaluation) baseline
     ax.axhline(y=steering_detection, color='red', linestyle='--', alpha=0.7, linewidth=2)
-    ax.annotate(f'Experiment 02 (steering evaluation) Baseline: {steering_detection:.1%}',
+    ax.annotate(f'02_steering_evaluation Baseline: {steering_detection:.1%}',
                xy=(len(all_labels) - 0.5, steering_detection + 0.02),
                fontsize=9, color='red', ha='right')
 
@@ -1441,7 +1442,7 @@ def create_baseline_comparison_plot(
     plt.savefig(plots_dir / "steering_baseline_simple.png", dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved Experiment 02 (steering evaluation) baseline comparison plots to {plots_dir}")
+    print(f"  Saved 02_steering_evaluation baseline comparison plots to {plots_dir}")
 
 
 def create_summary_report(
@@ -1546,7 +1547,7 @@ def create_summary_report(
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Experiment 44: Non-Assistant Persona Introspection"
+        description="Persona Variant Introspection (03b): Non-Assistant Persona Introspection"
     )
 
     parser.add_argument(
@@ -1590,8 +1591,8 @@ def parse_args():
         "--variants",
         type=str,
         nargs="+",
-        default=PERSONA_VARIANTS + ["story_framing"],
-        choices=PERSONA_VARIANTS + ["story_framing"],
+        default=PERSONA_VARIANTS,
+        choices=PERSONA_VARIANTS,
         help="Persona variants to test"
     )
     parser.add_argument(
@@ -1727,7 +1728,7 @@ def main():
                 with open(prompt_variant_path, 'r') as f:
                     prompt_variant_data = json.load(f)
 
-                # experiment 03c (prompt variants) results.json is a list of results, need to convert to exp44 format
+                # experiment 03c (prompt variants) results.json is a list of results; normalize into the summary layout
                 if isinstance(prompt_variant_data, list):
                     prompt_variant_results = prompt_variant_data
                 else:
@@ -1860,7 +1861,7 @@ def main():
         print(f"  Extracted and saved {len(concept_vectors)} concept vectors")
 
     # Pre-load experiment 02 (steering evaluation) baseline for progress plotting
-    print("\nLoading Experiment 02 (steering evaluation) baseline for comparison...")
+    print("\nLoading 02_steering_evaluation baseline for comparison...")
     steering_baseline = load_steering_baseline(
         steering_dir=Path(args.steering_dir),
         model_name=args.model,
@@ -1949,7 +1950,7 @@ def main():
     print("=" * 80)
     print(f"Results saved to: {output_dir}")
     print(f"Summary: {output_dir / 'summary.txt'}")
-    print(f"Experiment 02 (steering evaluation) Baseline Comparison: {output_dir / 'plots' / 'steering_baseline_comparison.png'}")
+    print(f"02_steering_evaluation Baseline Comparison: {output_dir / 'plots' / 'steering_baseline_comparison.png'}")
 
 
 if __name__ == "__main__":

@@ -48,8 +48,10 @@ from eval_utils import LLMJudge, batch_evaluate
 # ==============================================================================
 
 DEFAULT_MODEL = "gemma3_27b"
+# 04b_vector_geometry.py writes the ridge direction (primary_axis.pt) and all
+# decomposition artifacts (mean_diff, LDA, group centroids) into a single
+# per-config subdir — there is no separate decomposition directory.
 DEFAULT_GEOMETRY_DIR = "analysis/04b_vector_geometry"
-DEFAULT_GEOMETRY_DECOMP_DIR = "analysis/04b_vector_decomposition"
 DEFAULT_STEERING_DIR = "analysis/02b_steering_500_concepts"
 DEFAULT_OUTPUT_DIR = "analysis/04c_bidirectional_steering"
 
@@ -136,19 +138,25 @@ def save_checkpoint(checkpoint_path: Path, completed_items: List[str], status: s
 # ==============================================================================
 
 def load_ridge_direction(
-    geometry_decomp_dir: Path,
+    geometry_dir: Path,
     model_name: str,
     layer: int,
     strength: float,
     metric: str = "detection_rate",
 ) -> torch.Tensor:
-    """Load Ridge direction from 04b_vector_decomposition."""
-    ridge_path = geometry_decomp_dir / model_name / f"layer_{layer}_strength_{strength}" / metric / "primary_axis.pt"
+    """Load the Ridge direction saved by 04b_vector_geometry.py.
 
-    if not ridge_path.exists():
+    Tries ``primary_axis.pt`` first (alias written by 04b), then falls back to
+    ``introspection_direction_ridge_regression.pt`` under the same config dir.
+    """
+    base = geometry_dir / model_name / f"layer_{layer}_strength_{strength}" / metric
+    candidates = [base / "primary_axis.pt", base / "introspection_direction_ridge_regression.pt"]
+
+    ridge_path = next((p for p in candidates if p.exists()), None)
+    if ridge_path is None:
         raise FileNotFoundError(
-            f"Ridge direction not found at {ridge_path}. "
-            f"Run 04b_vector_decomposition.py first."
+            f"Ridge direction not found at any of: {', '.join(str(p) for p in candidates)}. "
+            f"Run 04b_vector_geometry.py first."
         )
 
     w_ridge = torch.load(ridge_path, map_location='cpu', weights_only=True)
@@ -175,8 +183,6 @@ def parse_args():
                         help="Path to experiment 04b (vector geometry) results")
     parser.add_argument("--steering-dir", type=str, default=DEFAULT_STEERING_DIR,
                         help="Path to experiment 02 (steering evaluation) results")
-    parser.add_argument("--geometry-decomp-dir", type=str, default=DEFAULT_GEOMETRY_DECOMP_DIR,
-                        help="Path to 04b_vector_decomposition results (for ridge direction)")
     parser.add_argument("-od", "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                         help="Output directory")
 
@@ -1921,9 +1927,9 @@ def main():
 
         # Compute pairing direction
         if args.pairing_direction == "ridge":
-            geometry_decomp_dir = Path(args.geometry_decomp_dir)
+            geometry_dir = Path(args.geometry_dir)
             try:
-                pairing_direction = load_ridge_direction(geometry_decomp_dir, args.model, layer, strength)
+                pairing_direction = load_ridge_direction(geometry_dir, args.model, layer, strength)
                 print(f"  Using RIDGE direction for pairing")
             except FileNotFoundError as e:
                 print(f"  WARNING: {e}")

@@ -170,16 +170,19 @@ def main():
         if detection_rates.get(c, 0.0) >= 0.60 and (vectors_dir / f"{c}.pt").exists():
             test_success.append(c)
 
-    # Only run success concepts (rotating AWAY from unembed)
-    test_failure = []
-
-    # Sample 30 from success for tractability
+    # Sample up to 30 concepts from each group for tractability. The paper's
+    # primary Appendix-H claim is about rotating *failure* vectors TOWARD the
+    # nearest unembed (and showing detection does NOT rise), so we need both
+    # groups populated. Success concepts serve as the inverse-direction
+    # control (rotating AWAY from unembed).
     rng = np.random.RandomState(42)
+    if len(test_failure) > 30:
+        test_failure = list(rng.choice(test_failure, 30, replace=False))
     if len(test_success) > 30:
         test_success = list(rng.choice(test_success, 30, replace=False))
 
-    print(f"Test failure concepts: {len(test_failure)} (skipped)")
-    print(f"Test success concepts (det >= 0.60): {len(test_success)}")
+    print(f"Test failure concepts (det <= 0.10, rotated TOWARD unembed): {len(test_failure)}")
+    print(f"Test success concepts (det >= 0.60, rotated AWAY from unembed): {len(test_success)}")
 
     # Create rotated vectors
     print("\nCreating rotated vectors...")

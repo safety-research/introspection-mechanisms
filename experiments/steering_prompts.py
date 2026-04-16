@@ -1,5 +1,5 @@
 """
-Prompts for exp56 negative steering (behavioral direction removal).
+Prompts for 05_negative_steering.py (behavioral direction removal).
 
 Each direction is defined by:
 - A set of "positive" prompts that activate the undesired behavior

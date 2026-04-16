@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 51: Attention Head Investigation
+Head Analysis: Attention Head Investigation
 
 Investigates attention head involvement in introspection via gradient-based
 attribution. Used for Section 5.2 of the paper, which finds that no single
@@ -53,7 +53,7 @@ from model_utils import ModelWrapper, load_model
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Exp51: Attention head investigation for introspection"
+        description="Attention head investigation for introspection"
     )
     parser.add_argument("-m", "--model", type=str, default="gemma3_27b")
     parser.add_argument("-c", "--concepts", nargs="+", default=None,

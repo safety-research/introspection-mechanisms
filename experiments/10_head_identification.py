@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment 51: Automatic Attention Head Identification for Introspection
+Head Analysis: Automatic Attention Head Identification for Introspection
 
 This experiment implements two principled approaches to identify causally important
 attention heads for introspection:
@@ -9,14 +9,15 @@ attention heads for introspection:
    - Amplifiers (positive alignment): shift output in steering direction
    - Suppressors (negative alignment): shift output against steering direction
 
-   Key insight: Previous exp12 used |cosine| which loses sign information.
-   A head with -0.8 alignment (suppressor) looks the same as +0.8 (amplifier).
+   Using the signed cosine (rather than its absolute value) preserves the
+   amplifier vs suppressor distinction: a head with -0.8 alignment (suppressor)
+   is qualitatively different from +0.8 (amplifier).
 
 2. **Gradient Attribution**: Computes ∂(logit_Yes - logit_No)/∂(head_output)
    This directly measures: "How much would changing this head's output change
    the detection decision?"
 
-Key methodological fixes from exp12:
+Methodological notes:
 - Signed alignment metric preserves amplifier vs suppressor distinction
 - Gradient-based attribution for direct causal measurement
 - Prompt-level patching at ALL token positions (not just last)
@@ -575,7 +576,8 @@ def compute_signed_steering_alignment(
     Positive alignment = head amplifies steering (potential helper)
     Negative alignment = head opposes steering (potential suppressor)
 
-    Key difference from exp12: We keep the sign, not just magnitude!
+    We keep the signed cosine (not just the magnitude) so amplifiers and
+    suppressors can be distinguished.
     """
     model = model_wrapper.model
     n_layers = model_wrapper.n_layers

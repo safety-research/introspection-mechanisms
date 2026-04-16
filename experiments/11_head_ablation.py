@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Exp51: Mean Ablation of Identified Attention Heads
+Head Ablation (11): Mean Ablation of Identified Attention Heads
 
 Run mean ablation experiments on attention heads identified in 12_head_investigation.
 Uses trial-number matched mean ablation:
@@ -919,7 +919,7 @@ def generate_plots(results_path: Path, output_dir: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Exp51: Head Ablation Experiment")
+    parser = argparse.ArgumentParser(description="Head Ablation Experiment")
     parser.add_argument("-m", "--model", type=str, default="gemma3_27b", help="Model name")
     parser.add_argument("--head-dir", type=str, default="analysis/12_head_investigation",
                         help="Path to 12_head_investigation results")
@@ -951,7 +951,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("EXP51: HEAD ABLATION EXPERIMENT")
+    print("HEAD ABLATION EXPERIMENT")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  Layer: {args.layer}")
@@ -1010,7 +1010,7 @@ def main():
 
     # Load concepts from specified partition
     print("\n" + "=" * 70)
-    print(f"LOADING {args.partition.upper()} CONCEPTS FROM EXP4")
+    print(f"LOADING {args.partition.upper()} CONCEPTS FROM 04b_vector_geometry")
     print("=" * 70)
     partition_concepts = load_partition_concepts(
         args.geometry_dir, args.model, args.layer, args.strength, args.partition
